@@ -1,5 +1,5 @@
-# Stage 1: Build (Upgraded to 1.85 for Edition 2024 support)
-FROM rust:1.85 AS builder
+# Stage 1: Build (Upgraded to 1.88 to support 'home' 0.5.12 and 'time' 0.3.47)
+FROM rust:1.88 AS builder
 WORKDIR /usr/src/app
 
 # Install system dependencies for SSL and Postgres
