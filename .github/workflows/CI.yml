@@ -32,3 +32,25 @@ jobs:
       run: |
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+Use code with caution.
+
+2. Save and Push
+Save the file (Cmd + S).
+Go to your VS Code terminal and run these 3 lines:
+bash
+git add .github/workflows/CI.yml
+git commit -m "Fix workflow: Remove Python bloat"
+git push origin main
+Use code with caution.
+
+3. Verify
+Go back to the Actions tab in GitHub. You should see a new run start. This time, it won't try to build "wheels" or "Python" stuff—it will jump straight to the Build, Tag, and Push steps for AWS.
+Does the new build look "cleaner" in the GitHub list now? Let me know when it hits the "Build" step—that's the one that takes the longest!
+
+
+
+
+Ask anything
+
+
+
