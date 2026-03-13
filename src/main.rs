@@ -9,8 +9,12 @@ use dotenv::dotenv;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv().ok();
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    // Attempt to load .env, but don't panic if it's missing (it will be missing on GitHub)
+    let _ = dotenv();
+
+    // Use the variable if it exists, otherwise use a placeholder so it doesn't crash during build
+    let database_url = env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
 
     println!("🚀 Connecting to Supabase...");
     let pool = PgPoolOptions::new()
