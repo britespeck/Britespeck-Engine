@@ -142,42 +142,47 @@ impl MarketFetcher {
         // ═══════════════════════════════════════════
         let k_url = "https://api.elections.kalshi.com";
         if let Ok(resp) = client.get(k_url).send().await {
-            if let Ok(json) = resp.json::<Value>().await {
-                if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
-                    for event in events {
-                        let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                        let ticker = event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("");
-                        
-                        let mut outcomes = Vec::new();
-                        if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                            for m in markets {
-                                if !is_kalshi_active(m) { continue; }
-                                let price = m.get("last_price").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0;
-                                outcomes.push(MarketOutcome {
-                                    name: m.get("title").and_then(|v| v.as_str()).unwrap_or("Yes").to_string(),
-                                    price,
-                                });
+            let status = resp.status();
+            if status.is_success() {
+                if let Ok(json) = resp.json::<Value>().await {
+                    if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
+                        for event in events {
+                            let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                            let ticker = event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("");
+                            
+                            let mut outcomes = Vec::new();
+                            if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
+                                for m in markets {
+                                    if !is_kalshi_active(m) { continue; }
+                                    let price = m.get("last_price").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0;
+                                    outcomes.push(MarketOutcome {
+                                        name: m.get("title").and_then(|v| v.as_str()).unwrap_or("Yes").to_string(),
+                                        price,
+                                    });
+                                }
                             }
-                        }
-                        
-                        if outcomes.is_empty() || ticker.is_empty() { continue; }
+                            
+                            if outcomes.is_empty() || ticker.is_empty() { continue; }
 
-                        unified.push(PredictionEvent {
-                            id: Uuid::new_v4(),
-                            title: event_title.to_string(), // MOTHER TITLE
-                            platform: "Kalshi".to_string(),
-                            odds: outcomes[0].price,
-                            category: map_kalshi_category("general", event_title).to_string(),
-                            external_id: ticker.to_string(), // MOTHER ID
-                            volume_24h: 0.0,
-                            icon_url: extract_image(event, &["image_url"]),
-                            updated_at: Utc::now(),
-                            status: "active".to_string(),
-                            end_date: parse_end_date(event, &["strike_date"]),
-                            outcomes,
-                        });
+                            unified.push(PredictionEvent {
+                                id: Uuid::new_v4(),
+                                title: event_title.to_string(),
+                                platform: "Kalshi".to_string(),
+                                odds: outcomes[0].price,
+                                category: map_kalshi_category("general", event_title).to_string(),
+                                external_id: ticker.to_string(),
+                                volume_24h: 0.0,
+                                icon_url: extract_image(event, &["image_url"]),
+                                updated_at: Utc::now(),
+                                status: "active".to_string(),
+                                end_date: parse_end_date(event, &["strike_date"]),
+                                outcomes,
+                            });
+                        }
                     }
                 }
+            } else {
+                println!("📡 Kalshi API Error [{}]: {}", status, k_url);
             }
         }
 
@@ -186,52 +191,57 @@ impl MarketFetcher {
         // ═══════════════════════════════════════════
         let p_url = "https://gamma-api.polymarket.com";
         if let Ok(resp) = client.get(p_url).send().await {
-            if let Ok(json) = resp.json::<Value>().await {
-                if let Some(events) = json.as_array() {
-                    for event in events {
-                        let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                        let mother_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        
-                        let mut outcomes = Vec::new();
-                        if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                            for m in markets {
-                                if !is_poly_active(m) { continue; }
-                                let price = m.get("outcomePrices")
-                                    .and_then(|p| p.as_array())
-                                    .and_then(|arr| arr.first())
-                                    .and_then(|v| v.as_str())
-                                    .and_then(|s| s.parse::<f64>().ok())
-                                    .unwrap_or(0.0);
-                                
-                                let outcome_name = m.get("groupItemTitle")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("Outcome");
+            let status = resp.status();
+            if status.is_success() {
+                if let Ok(json) = resp.json::<Value>().await {
+                    if let Some(events) = json.as_array() {
+                        for event in events {
+                            let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                            let mother_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            
+                            let mut outcomes = Vec::new();
+                            if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
+                                for m in markets {
+                                    if !is_poly_active(m) { continue; }
+                                    let price = m.get("outcomePrices")
+                                        .and_then(|p| p.as_array())
+                                        .and_then(|arr| arr.first())
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| s.parse::<f64>().ok())
+                                        .unwrap_or(0.0);
+                                    
+                                    let outcome_name = m.get("groupItemTitle")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Outcome");
 
-                                outcomes.push(MarketOutcome {
-                                    name: outcome_name.to_string(),
-                                    price,
-                                });
+                                    outcomes.push(MarketOutcome {
+                                        name: outcome_name.to_string(),
+                                        price,
+                                    });
+                                }
                             }
+
+                            if outcomes.is_empty() || mother_id.is_empty() { continue; }
+
+                            unified.push(PredictionEvent {
+                                id: Uuid::new_v4(),
+                                title: event_title.to_string(),
+                                platform: "Polymarket".to_string(),
+                                odds: outcomes[0].price,
+                                category: map_polymarket_category(&[], event_title).to_string(),
+                                external_id: mother_id.to_string(),
+                                volume_24h: event.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                icon_url: event.get("image").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                updated_at: Utc::now(),
+                                status: "active".to_string(),
+                                end_date: parse_end_date(event, &["endDate"]),
+                                outcomes,
+                            });
                         }
-
-                        if outcomes.is_empty() || mother_id.is_empty() { continue; }
-
-                        unified.push(PredictionEvent {
-                            id: Uuid::new_v4(),
-                            title: event_title.to_string(), // MOTHER TITLE
-                            platform: "Polymarket".to_string(),
-                            odds: outcomes[0].price,
-                            category: map_polymarket_category(&[], event_title).to_string(),
-                            external_id: mother_id.to_string(), // MOTHER ID
-                            volume_24h: event.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                            icon_url: event.get("image").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                            updated_at: Utc::now(),
-                            status: "active".to_string(),
-                            end_date: parse_end_date(event, &["endDate"]),
-                            outcomes,
-                        });
                     }
                 }
+            } else {
+                println!("📡 Polymarket API Error [{}]: {}", status, p_url);
             }
         }
         unified
