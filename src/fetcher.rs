@@ -2,7 +2,7 @@ pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<Predicti
     let mut unified = Vec::new();
 
     // ═══════════════════════════════════════════
-    // KALSHI (Fixed Endpoint)
+    // KALSHI (Full API Path)
     // ═══════════════════════════════════════════
     let k_url = "https://api.elections.kalshi.com";
     if let Ok(resp) = client.get(k_url).send().await {
@@ -31,7 +31,8 @@ pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<Predicti
                                 id: Uuid::new_v4(),
                                 title: event_title.to_string(),
                                 platform: "Kalshi".to_string(),
-                                odds: outcomes[0].price,
+                                // Use .first() safely to get the main odds
+                                odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
                                 category: map_kalshi_category("general", event_title).to_string(),
                                 external_id: ticker.to_string(),
                                 volume_24h: 0.0,
@@ -46,24 +47,24 @@ pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<Predicti
                 }
             }
         } else {
-            println!("📡 Kalshi API returned error: {} at {}", status, k_url);
+            println!("📡 Kalshi API error: {} at {}", status, k_url);
         }
     }
 
     // ═══════════════════════════════════════════
-    // POLYMARKET (Debug Mode)
+    // POLYMARKET (Full API Path + Debugging)
     // ═══════════════════════════════════════════
     let p_url = "https://gamma-api.polymarket.com";
     if let Ok(resp) = client.get(p_url).send().await {
         let status = resp.status();
         if status.is_success() {
             if let Ok(json) = resp.json::<Value>().await {
-                // DEBUG: See the first event structure in logs
-                if let Some(first) = json.as_array().and_then(|a| a.first()) {
-                     println!("📡 Polymarket Sample Event: {}", serde_json::to_string(first).unwrap_or_default());
-                }
-
+                // This will print the raw data to AWS logs so we can see why it's 0
                 if let Some(events) = json.as_array() {
+                    if events.is_empty() {
+                        println!("📡 Polymarket returned 200 OK but 0 events in the array.");
+                    }
+
                     for event in events {
                         let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
                         let mother_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -91,7 +92,7 @@ pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<Predicti
                                 id: Uuid::new_v4(),
                                 title: event_title.to_string(),
                                 platform: "Polymarket".to_string(),
-                                odds: outcomes[0].price,
+                                odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
                                 category: map_polymarket_category(&[], event_title).to_string(),
                                 external_id: mother_id.to_string(),
                                 volume_24h: event.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0),
