@@ -1,4 +1,4 @@
-use crate::models::{PredictionEvent, MarketOutcome}; // Added MarketOutcome
+use crate::models::{PredictionEvent, MarketOutcome};
 use chrono::{Datelike, Utc};
 use uuid::Uuid;
 use serde_json::Value;
@@ -104,19 +104,6 @@ fn extract_image(obj: &Value, fields: &[&str]) -> Option<String> {
     None
 }
 
-fn is_past_event(title: &str) -> bool {
-    let current_year = Utc::now().year();
-    let re = regex::Regex::new(r"\b(20\d{2})\b").unwrap();
-    for cap in re.captures_iter(title) {
-        if let Ok(year) = cap[1].parse::<i32>() {
-            if year < current_year {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn is_kalshi_active(market: &Value) -> bool {
     let status = market.get("status").and_then(|v| v.as_str()).unwrap_or("");
     let result = market.get("result").and_then(|v| v.as_str()).unwrap_or("");
@@ -150,13 +137,17 @@ impl MarketFetcher {
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
         let mut unified = Vec::new();
 
+        // ═══════════════════════════════════════════
         // KALSHI
-        let k_url = "https://api.elections.kalshi.com/trade-api/v2/events?status=open&with_nested_markets=true";
+        // ═══════════════════════════════════════════
+        let k_url = "https://api.elections.kalshi.com";
         if let Ok(resp) = client.get(k_url).send().await {
             if let Ok(json) = resp.json::<Value>().await {
                 if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
                     for event in events {
                         let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                        let ticker = event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("");
+                        
                         let mut outcomes = Vec::new();
                         if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
                             for m in markets {
@@ -168,14 +159,16 @@ impl MarketFetcher {
                                 });
                             }
                         }
-                        if outcomes.is_empty() { continue; }
+                        
+                        if outcomes.is_empty() || ticker.is_empty() { continue; }
+
                         unified.push(PredictionEvent {
                             id: Uuid::new_v4(),
-                            title: event_title.to_string(),
+                            title: event_title.to_string(), // MOTHER TITLE
                             platform: "Kalshi".to_string(),
                             odds: outcomes[0].price,
                             category: map_kalshi_category("general", event_title).to_string(),
-                            external_id: event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            external_id: ticker.to_string(), // MOTHER ID
                             volume_24h: 0.0,
                             icon_url: extract_image(event, &["image_url"]),
                             updated_at: Utc::now(),
@@ -188,13 +181,17 @@ impl MarketFetcher {
             }
         }
 
+        // ═══════════════════════════════════════════
         // POLYMARKET
+        // ═══════════════════════════════════════════
         let p_url = "https://gamma-api.polymarket.com";
         if let Ok(resp) = client.get(p_url).send().await {
             if let Ok(json) = resp.json::<Value>().await {
                 if let Some(events) = json.as_array() {
                     for event in events {
                         let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                        let mother_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        
                         let mut outcomes = Vec::new();
                         if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
                             for m in markets {
@@ -205,20 +202,27 @@ impl MarketFetcher {
                                     .and_then(|v| v.as_str())
                                     .and_then(|s| s.parse::<f64>().ok())
                                     .unwrap_or(0.0);
+                                
+                                let outcome_name = m.get("groupItemTitle")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Outcome");
+
                                 outcomes.push(MarketOutcome {
-                                    name: m.get("groupItemTitle").and_then(|v| v.as_str()).unwrap_or("Outcome").to_string(),
+                                    name: outcome_name.to_string(),
                                     price,
                                 });
                             }
                         }
-                        if outcomes.is_empty() { continue; }
+
+                        if outcomes.is_empty() || mother_id.is_empty() { continue; }
+
                         unified.push(PredictionEvent {
                             id: Uuid::new_v4(),
-                            title: event_title.to_string(),
+                            title: event_title.to_string(), // MOTHER TITLE
                             platform: "Polymarket".to_string(),
                             odds: outcomes[0].price,
                             category: map_polymarket_category(&[], event_title).to_string(),
-                            external_id: event.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            external_id: mother_id.to_string(), // MOTHER ID
                             volume_24h: event.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0),
                             icon_url: event.get("image").and_then(|v| v.as_str()).map(|s| s.to_string()),
                             updated_at: Utc::now(),
