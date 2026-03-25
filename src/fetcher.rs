@@ -142,8 +142,7 @@ impl MarketFetcher {
         // ═══════════════════════════════════════════
         let k_url = "https://api.elections.kalshi.com";
         if let Ok(resp) = client.get(k_url).send().await {
-            let status = resp.status();
-            if status.is_success() {
+            if resp.status().is_success() {
                 if let Ok(json) = resp.json::<Value>().await {
                     if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
                         for event in events {
@@ -182,7 +181,7 @@ impl MarketFetcher {
                     }
                 }
             } else {
-                println!("📡 Kalshi API Error [{}]: {}", status, k_url);
+                println!("📡 Kalshi API returned error: {}", resp.status());
             }
         }
 
@@ -191,9 +190,9 @@ impl MarketFetcher {
         // ═══════════════════════════════════════════
         let p_url = "https://gamma-api.polymarket.com";
         if let Ok(resp) = client.get(p_url).send().await {
-            let status = resp.status();
-            if status.is_success() {
+            if resp.status().is_success() {
                 if let Ok(json) = resp.json::<Value>().await {
+                    // Polymarket returns a direct array, not an object with an "events" key
                     if let Some(events) = json.as_array() {
                         for event in events {
                             let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
@@ -241,7 +240,7 @@ impl MarketFetcher {
                     }
                 }
             } else {
-                println!("📡 Polymarket API Error [{}]: {}", status, p_url);
+                println!("📡 Polymarket API returned error: {}", resp.status());
             }
         }
         unified
