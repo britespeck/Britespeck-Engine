@@ -3,6 +3,12 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MarketOutcome {
+    pub name: String,
+    pub price: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PredictionEvent {
     pub id: Uuid,
     pub title: String,
@@ -15,4 +21,6 @@ pub struct PredictionEvent {
     pub updated_at: DateTime<Utc>,
     pub status: String,
     pub end_date: Option<DateTime<Utc>>,
+    // This stores your "March 31st", "April 15th", etc. outcomes
+    pub outcomes: Vec<MarketOutcome>,
 }

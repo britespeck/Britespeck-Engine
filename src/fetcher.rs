@@ -1,4 +1,4 @@
-use crate::models::PredictionEvent;
+use crate::models::{PredictionEvent, MarketOutcome}; // Added MarketOutcome
 use chrono::{Datelike, Utc};
 use uuid::Uuid;
 use serde_json::Value;
@@ -149,138 +149,87 @@ impl MarketFetcher {
 
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
         let mut unified = Vec::new();
-        let mut images_found = 0u32;
-        let mut skipped = 0u32;
 
-        // ═══════════════════════════════════════════
         // KALSHI
-        // ═══════════════════════════════════════════
         let k_url = "https://api.elections.kalshi.com/trade-api/v2/events?status=open&with_nested_markets=true";
-        match client.get(k_url).send().await {
-            Ok(resp) => {
-                println!("📡 Kalshi status: {}", resp.status());
-                if resp.status().is_success() {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
-                            println!("   ✅ Kalshi events found: {}", events.len());
-
-                            for event in events {
-                                let raw_cat = event.get("category").and_then(|v| v.as_str()).unwrap_or("general");
-                                let icon = extract_image(event, &["image_url", "imageUrl", "image", "thumbnail"]);
-                                if icon.is_some() { images_found += 1; }
-
-                                if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                                    if let Some(m) = markets.first() {
-                                        let title = m.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                                        let category = map_kalshi_category(raw_cat, title);
-                                        let odds = m.get("last_price").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0;
-                                        let end_date = parse_end_date(m, &["close_time", "expiration_time", "end_date"]);
-
-                                        if !is_kalshi_active(m) || is_past_event(title) || odds == 0.0 || odds == 1.0 {
-                                            skipped += 1;
-                                            continue;
-                                        }
-                                        if let Some(ed) = end_date {
-                                            if ed < Utc::now() {
-                                                skipped += 1;
-                                                continue;
-                                            }
-                                        }
-
-                                        unified.push(PredictionEvent {
-                                            id: Uuid::new_v4(),
-                                            title: title.to_string(),
-                                            platform: "kalshi".to_string(),
-                                            odds,
-                                            category: category.to_string(),
-                                            external_id: format!("kalshi-{}", m.get("ticker").and_then(|v| v.as_str()).unwrap_or("0")),
-                                            volume_24h: m.get("volume_24h").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                                            icon_url: icon.clone(),
-                                            updated_at: Utc::now(),
-                                            status: "active".to_string(),
-                                            end_date,
-                                        });
-                                    }
-                                }
+        if let Ok(resp) = client.get(k_url).send().await {
+            if let Ok(json) = resp.json::<Value>().await {
+                if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
+                    for event in events {
+                        let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                        let mut outcomes = Vec::new();
+                        if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
+                            for m in markets {
+                                if !is_kalshi_active(m) { continue; }
+                                let price = m.get("last_price").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0;
+                                outcomes.push(MarketOutcome {
+                                    name: m.get("title").and_then(|v| v.as_str()).unwrap_or("Yes").to_string(),
+                                    price,
+                                });
                             }
                         }
+                        if outcomes.is_empty() { continue; }
+                        unified.push(PredictionEvent {
+                            id: Uuid::new_v4(),
+                            title: event_title.to_string(),
+                            platform: "Kalshi".to_string(),
+                            odds: outcomes[0].price,
+                            category: map_kalshi_category("general", event_title).to_string(),
+                            external_id: event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            volume_24h: 0.0,
+                            icon_url: extract_image(event, &["image_url"]),
+                            updated_at: Utc::now(),
+                            status: "active".to_string(),
+                            end_date: parse_end_date(event, &["strike_date"]),
+                            outcomes,
+                        });
                     }
                 }
             }
-            Err(e) => println!("❌ Kalshi request failed: {}", e),
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // ═══════════════════════════════════════════
         // POLYMARKET
-        // ═══════════════════════════════════════════
-        let p_url = "https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100";
-        match client.get(p_url).send().await {
-            Ok(resp) => {
-                println!("📡 Polymarket status: {}", resp.status());
-                if resp.status().is_success() {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        let events_list = json.as_array()
-                            .or_else(|| json.get("events").and_then(|e| e.as_array()));
-
-                        if let Some(events) = events_list {
-                            println!("   ✅ Polymarket events found: {}", events.len());
-
-                            for event in events {
-                                let tags: Vec<String> = event.get("tags")
-                                    .and_then(|t| t.as_array())
-                                    .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-                                    .unwrap_or_default();
-                                let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                                let category = map_polymarket_category(&tags, event_title);
-                                let icon = extract_image(event, &["imageOptimized", "image", "imageUrl", "icon", "thumbnail"]);
-                                if icon.is_some() { images_found += 1; }
-
-                                if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                                    for m in markets {
-                                        let title = m.get("question").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                                        let prices_str = m.get("outcomePrices").and_then(|v| v.as_str()).unwrap_or("[\"0.5\"]");
-                                        let prices: Vec<String> = serde_json::from_str(prices_str).unwrap_or_default();
-                                        let odds = prices.get(0).and_then(|p| p.parse::<f64>().ok()).unwrap_or(0.5);
-                                        let end_date = parse_end_date(m, &["endDate", "end_date_iso", "expirationDate"]);
-
-                                        if !is_poly_active(m) || is_past_event(title) || odds == 0.0 || odds == 1.0 {
-                                            skipped += 1;
-                                            continue;
-                                        }
-                                        if let Some(ed) = end_date {
-                                            if ed < Utc::now() {
-                                                skipped += 1;
-                                                continue;
-                                            }
-                                        }
-
-                                        unified.push(PredictionEvent {
-                                            id: Uuid::new_v4(),
-                                            title: title.to_string(),
-                                            platform: "polymarket".to_string(),
-                                            odds,
-                                            category: category.to_string(),
-                                            external_id: format!("poly-{}", m.get("id").unwrap_or(&Value::Null)),
-                                            volume_24h: m.get("volume24hr").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                                            icon_url: icon.clone(),
-                                            updated_at: Utc::now(),
-                                            status: "active".to_string(),
-                                            end_date,
-                                        });
-                                    }
-                                }
+        let p_url = "https://gamma-api.polymarket.com";
+        if let Ok(resp) = client.get(p_url).send().await {
+            if let Ok(json) = resp.json::<Value>().await {
+                if let Some(events) = json.as_array() {
+                    for event in events {
+                        let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                        let mut outcomes = Vec::new();
+                        if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
+                            for m in markets {
+                                if !is_poly_active(m) { continue; }
+                                let price = m.get("outcomePrices")
+                                    .and_then(|p| p.as_array())
+                                    .and_then(|arr| arr.first())
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0);
+                                outcomes.push(MarketOutcome {
+                                    name: m.get("groupItemTitle").and_then(|v| v.as_str()).unwrap_or("Outcome").to_string(),
+                                    price,
+                                });
                             }
                         }
+                        if outcomes.is_empty() { continue; }
+                        unified.push(PredictionEvent {
+                            id: Uuid::new_v4(),
+                            title: event_title.to_string(),
+                            platform: "Polymarket".to_string(),
+                            odds: outcomes[0].price,
+                            category: map_polymarket_category(&[], event_title).to_string(),
+                            external_id: event.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            volume_24h: event.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            icon_url: event.get("image").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            updated_at: Utc::now(),
+                            status: "active".to_string(),
+                            end_date: parse_end_date(event, &["endDate"]),
+                            outcomes,
+                        });
                     }
                 }
             }
-            Err(e) => println!("❌ Polymarket request failed: {}", e),
         }
-
-        println!("🖼️ Total events with images: {}/{}", images_found, unified.len());
-        println!("🚫 Skipped resolved/expired/past: {}", skipped);
         unified
     }
 }

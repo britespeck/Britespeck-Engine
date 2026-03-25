@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::fetcher::MarketFetcher;
 use std::env;
 use dotenv::dotenv;
+use serde_json; // Required for JSONB conversion
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,9 +41,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("💎 Syncing {} active events...", events.len());
 
             for event in &events {
+                // Convert the Vec<MarketOutcome> into a JSON value for Supabase
+                let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or_default();
+
                 let _ = sqlx::query(
-                    "INSERT INTO prediction_events (id, title, platform, odds, category, external_id, volume_24h, icon_url, updated_at, status, end_date)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    "INSERT INTO prediction_events (
+                        id, title, platform, odds, category, external_id, 
+                        volume_24h, icon_url, updated_at, status, end_date, outcomes
+                    )
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                      ON CONFLICT (external_id) DO UPDATE
                      SET odds = EXCLUDED.odds,
                          category = EXCLUDED.category,
@@ -50,7 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                          icon_url = EXCLUDED.icon_url,
                          updated_at = EXCLUDED.updated_at,
                          status = EXCLUDED.status,
-                         end_date = EXCLUDED.end_date"
+                         end_date = EXCLUDED.end_date,
+                         outcomes = EXCLUDED.outcomes"
                 )
                 .bind(event.id)
                 .bind(&event.title)
@@ -63,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bind(event.updated_at)
                 .bind(&event.status)
                 .bind(event.end_date)
+                .bind(outcomes_json) // The 12th binding
                 .execute(&pool)
                 .await;
             }
