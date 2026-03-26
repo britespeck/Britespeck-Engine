@@ -137,9 +137,7 @@ impl MarketFetcher {
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
         let mut unified = Vec::new();
 
-        // ═══════════════════════════════════════════
-        // KALSHI (FULL API PATH)
-        // ═══════════════════════════════════════════
+        // ── KALSHI ──────────────────────────────────────────────
         let k_url = "https://api.elections.kalshi.com/trade-api/v2/events?limit=200&status=open&with_nested_markets=true";
         match client.get(k_url).send().await {
             Ok(resp) => {
@@ -147,7 +145,7 @@ impl MarketFetcher {
                 if status.is_success() {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
-                            println!("📡 DEBUG: Kalshi found {} events", events.len());
+                            println!("📡 Kalshi returned {} events", events.len());
                             for event in events {
                                 let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
                                 let ticker = event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("");
@@ -183,25 +181,22 @@ impl MarketFetcher {
                         }
                     }
                 } else {
-                    println!("❌ Kalshi API Error: HTTP {}", status);
+                    println!("❌ Kalshi API error: HTTP {}", status);
                 }
-            },
-            Err(e) => println!("❌ Kalshi Connection Failed: {}", e),
+            }
+            Err(e) => println!("❌ Kalshi connection failed: {}", e),
         }
 
-        // ═══════════════════════════════════════════
-        // POLYMARKET (FULL API PATH — returns events with nested markets)
-        // ═══════════════════════════════════════════
+        // ── POLYMARKET ──────────────────────────────────────────
         let p_url = "https://gamma-api.polymarket.com/events?limit=200&active=true&closed=false";
         match client.get(p_url).send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
                     if let Ok(events) = resp.json::<Vec<Value>>().await {
-                        println!("📡 DEBUG: Polymarket found {} events", events.len());
+                        println!("📡 Polymarket returned {} events", events.len());
                         for event in &events {
                             let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                            let mother_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
                             let tags: Vec<String> = event.get("tags")
                                 .and_then(|v| v.as_array())
@@ -209,11 +204,21 @@ impl MarketFetcher {
                                 .unwrap_or_default();
 
                             let mut outcomes = Vec::new();
+                            let mut total_volume: f64 = 0.0;
+                            let mut first_ext_id = String::new();
+
                             if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
                                 for m in markets {
                                     if !is_poly_active(m) { continue; }
 
-                                    // outcomePrices comes as a JSON string: "[\"0.55\",\"0.45\"]"
+                                    let market_title = m.get("question").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                                    let ext_id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
+
+                                    if first_ext_id.is_empty() && !ext_id.is_empty() {
+                                        first_ext_id = ext_id.to_string();
+                                    }
+
+                                    // outcomePrices is a JSON string like "[\"0.55\",\"0.45\"]"
                                     let price = m.get("outcomePrices")
                                         .and_then(|p| p.as_str())
                                         .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
@@ -221,28 +226,26 @@ impl MarketFetcher {
                                         .and_then(|s| s.parse::<f64>().ok())
                                         .unwrap_or(0.0);
 
-                                    let outcome_name = m.get("groupItemTitle")
-                                        .and_then(|v| v.as_str())
-                                        .or_else(|| m.get("question").and_then(|v| v.as_str()))
-                                        .unwrap_or("Outcome");
+                                    let vol = m.get("volume24hr").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    total_volume += vol;
 
                                     outcomes.push(MarketOutcome {
-                                        name: outcome_name.to_string(),
+                                        name: market_title.to_string(),
                                         price,
                                     });
                                 }
                             }
 
-                            if !outcomes.is_empty() && !mother_id.is_empty() {
+                            if !outcomes.is_empty() && !first_ext_id.is_empty() {
                                 unified.push(PredictionEvent {
                                     id: Uuid::new_v4(),
                                     title: event_title.to_string(),
                                     platform: "Polymarket".to_string(),
                                     odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
                                     category: map_polymarket_category(&tags, event_title).to_string(),
-                                    external_id: mother_id.to_string(),
-                                    volume_24h: event.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                                    image_url: event.get("image").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    external_id: first_ext_id,
+                                    volume_24h: total_volume,
+                                    image_url: extract_image(event, &["image", "icon"]),
                                     ends_at: parse_end_date(event, &["endDate"]),
                                     outcomes,
                                 });
@@ -250,10 +253,10 @@ impl MarketFetcher {
                         }
                     }
                 } else {
-                    println!("❌ Polymarket API Error: HTTP {}", status);
+                    println!("❌ Polymarket API error: HTTP {}", status);
                 }
-            },
-            Err(e) => println!("❌ Polymarket Connection Failed: {}", e),
+            }
+            Err(e) => println!("❌ Polymarket connection failed: {}", e),
         }
 
         unified
