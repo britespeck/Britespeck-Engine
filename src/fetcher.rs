@@ -168,7 +168,7 @@ impl MarketFetcher {
                         }
                     }
                 } else {
-                    println!("❌ Kalshi API returned error: {}", resp.status());
+                    println!("❌ Kalshi API Error: HTTP {}", resp.status());
                 }
             }
             Err(e) => println!("❌ Kalshi Connection Failed: {}", e),
@@ -186,7 +186,6 @@ impl MarketFetcher {
                             let title = m.get("question").and_then(|v| v.as_str()).unwrap_or("Unknown");
                             let ext_id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
                             
-                            // Parsing tags into a Vec<String> to fix the "Sized" error
                             let tags: Vec<String> = m.get("tags")
                                 .and_then(|v| v.as_array())
                                 .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
@@ -219,7 +218,7 @@ impl MarketFetcher {
                         }
                     }
                 } else {
-                    println!("❌ Polymarket API returned error: {}", resp.status());
+                    println!("❌ Polymarket API Error: HTTP {}", resp.status());
                 }
             }
             Err(e) => println!("❌ Polymarket Connection Failed: {}", e),
