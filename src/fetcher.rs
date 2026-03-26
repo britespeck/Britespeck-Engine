@@ -2,8 +2,14 @@ use crate::models::{PredictionEvent, MarketOutcome};
 use chrono::Utc;
 use uuid::Uuid;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Duration;
 
-pub struct MarketFetcher {}
+pub struct MarketFetcher {
+    /// Cache of Kalshi ticker -> og:image URL (persists across sync loops)
+    kalshi_image_cache: Mutex<HashMap<String, Option<String>>>,
+}
 
 fn categorize_by_title(title: &str) -> Option<&'static str> {
     let t = title.to_lowercase();
@@ -121,8 +127,52 @@ fn parse_end_date(obj: &Value, fields: &[&str]) -> Option<chrono::DateTime<Utc>>
     None
 }
 
+/// Scrape og:image from a Kalshi event page (lightweight HTML parse).
+async fn scrape_kalshi_og_image(client: &reqwest::Client, event_ticker: &str) -> Option<String> {
+    let page_url = format!("https://kalshi.com/markets/{}", event_ticker.to_lowercase());
+    let resp = client.get(&page_url).send().await.ok()?;
+    if !resp.status().is_success() { return None; }
+    let html = resp.text().await.ok()?;
+
+    let marker = "og:image";
+    let pos = html.find(marker)?;
+    let after = &html[pos..];
+    let content_start = after.find("content=\"")? + 9;
+    let content_slice = &after[content_start..];
+    let content_end = content_slice.find('"')?;
+    let url = &content_slice[..content_end];
+
+    if url.starts_with("http") { Some(url.to_string()) } else { None }
+}
+
 impl MarketFetcher {
-    pub fn new() -> Self { Self {} }
+    pub fn new() -> Self {
+        Self {
+            kalshi_image_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Get cached image or scrape once, then cache forever.
+    async fn get_kalshi_image(&self, client: &reqwest::Client, ticker: &str) -> Option<String> {
+        // Check cache first
+        {
+            let cache = self.kalshi_image_cache.lock().unwrap();
+            if let Some(cached) = cache.get(ticker) {
+                return cached.clone();
+            }
+        }
+
+        // Not cached — scrape it
+        let image = scrape_kalshi_og_image(client, ticker).await;
+
+        // Store in cache (even None, so we don't retry failed scrapes)
+        {
+            let mut cache = self.kalshi_image_cache.lock().unwrap();
+            cache.insert(ticker.to_string(), image.clone());
+        }
+
+        image
+    }
 
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
         println!("🚀 Fetching markets (Stealth Headers & 30s heartbeat)...");
@@ -130,10 +180,16 @@ impl MarketFetcher {
         let mut unified = Vec::new();
 
         // ═══════════════════════════════════════════════════════════
-        // 1. KALSHI — FULL API PATH (not just the domain!)
+        // 1. KALSHI — Clean client WITHOUT Polymarket headers
         // ═══════════════════════════════════════════════════════════
+        let kalshi_client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+            .timeout(Duration::from_secs(25))
+            .build()
+            .unwrap_or_else(|_| client.clone());
+
         let k_url = "https://api.elections.kalshi.com/trade-api/v2/events?limit=200&status=open&with_nested_markets=true";
-        match client.get(k_url).send().await {
+        match kalshi_client.get(k_url).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
                     if let Ok(json) = resp.json::<Value>().await {
@@ -157,6 +213,12 @@ impl MarketFetcher {
                                 }
 
                                 if !outcomes.is_empty() && !ticker.is_empty() {
+                                    // Try API fields first, then cached/scraped og:image
+                                    let mut icon = extract_image(event, &["image_url", "thumbnail_url"]);
+                                    if icon.is_none() {
+                                        icon = self.get_kalshi_image(&kalshi_client, ticker).await;
+                                    }
+
                                     unified.push(PredictionEvent {
                                         id: Uuid::new_v4(),
                                         title: event_title.to_string(),
@@ -165,7 +227,7 @@ impl MarketFetcher {
                                         category: map_kalshi_category(api_category, event_title).to_string(),
                                         external_id: ticker.to_string(),
                                         volume_24h: 0.0,
-                                        icon_url: extract_image(event, &["image_url", "thumbnail_url"]),
+                                        icon_url: icon,
                                         updated_at: Utc::now(),
                                         status: "active".to_string(),
                                         end_date: parse_end_date(event, &["strike_date", "expiration_time"]),
@@ -183,7 +245,7 @@ impl MarketFetcher {
         }
 
         // ═══════════════════════════════════════════════════════════
-        // 2. POLYMARKET — FULL API PATH (not just the domain!)
+        // 2. POLYMARKET — Uses shared client WITH Polymarket headers
         // ═══════════════════════════════════════════════════════════
         let p_url = "https://gamma-api.polymarket.com/events?limit=200&active=true&closed=false";
         match client.get(p_url).send().await {
@@ -209,7 +271,6 @@ impl MarketFetcher {
 
                                 if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
                                     for m in markets {
-                                        // outcomePrices is a JSON STRING like "[\"0.55\",\"0.45\"]"
                                         let price = m.get("outcomePrices")
                                             .and_then(|p| p.as_str())
                                             .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
