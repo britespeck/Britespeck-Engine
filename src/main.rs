@@ -117,13 +117,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
-Use code with caution.
-
-Ready to push this alongside the corrected fetcher.rs paths and see those "0 events" turn into real data?
-
-
-
-
-Ask anything
 
 
