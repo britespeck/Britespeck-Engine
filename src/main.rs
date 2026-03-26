@@ -1,43 +1,50 @@
 mod models;
 mod fetcher;
 
-use sqlx::postgres::{PgPoolOptions, Postgres}; // Explicitly import Postgres for query_as
+use sqlx::postgres::{PgPoolOptions, Postgres}; 
 use std::time::Duration;
 use crate::fetcher::MarketFetcher;
 use std::env;
 use dotenv::dotenv;
 use serde_json;
-use reqwest::header::{HeaderMap, HeaderValue}; // Added for stealth headers
+use reqwest::header::{HeaderMap, HeaderValue}; 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
 
-    // 1. Get DB URL and handle potential empty strings
     let database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
 
     println!("🚀 Connecting to Supabase...");
     
-    // 2. Build the pool
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(10))
         .connect(&database_url)
         .await?;
 
-    // --- STEALTH CLIENT SETUP ---
+    // --- STEALTH CLIENT SETUP WITH PROXY ---
     let mut headers = HeaderMap::new();
     headers.insert("Accept", HeaderValue::from_static("application/json, text/plain, */*"));
     headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
     headers.insert("Origin", HeaderValue::from_static("https://polymarket.com"));
     headers.insert("Referer", HeaderValue::from_static("https://polymarket.com"));
 
-    let client = reqwest::Client::builder()
+    let mut client_builder = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         .default_headers(headers)
-        .timeout(Duration::from_secs(20))
-        .build()?;
+        .cookie_store(true) // Enables "human" cookie behavior
+        .timeout(Duration::from_secs(25));
+
+    // Optional: Add Proxy if PROXY_URL is set in AWS Environment
+    if let Ok(proxy_url) = env::var("PROXY_URL") {
+        println!("🌐 Using Proxy: {}", proxy_url);
+        let proxy = reqwest::Proxy::all(proxy_url)?;
+        client_builder = client_builder.proxy(proxy);
+    }
+
+    let client = client_builder.build()?;
     // ----------------------------
 
     let fetcher = MarketFetcher::new();
@@ -48,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let events = fetcher.get_unified_events(&client).await;
         
         if events.is_empty() {
-            println!("⚠️ 0 events found. Check API paths.");
+            println!("⚠️ 0 events found. Check API paths or Proxy status.");
         } else {
             println!("💎 Syncing {} active events...", events.len());
 
