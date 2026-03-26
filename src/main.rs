@@ -1,23 +1,29 @@
 mod models;
 mod fetcher;
 
-use sqlx::postgres::{PgPoolOptions, Postgres}; 
+use sqlx::postgres::{PgPoolOptions, Postgres};
 use std::time::Duration;
 use crate::fetcher::MarketFetcher;
 use std::env;
 use dotenv::dotenv;
 use serde_json;
-use reqwest::header::{HeaderMap, HeaderValue}; 
+use reqwest::header::{HeaderMap, HeaderValue};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
 
-    let database_url = env::var("DATABASE_URL")
+    let mut database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
 
+    // Disable prepared statement caching to prevent "already exists" errors
+    if database_url.contains('?') {
+        database_url.push_str("&prepared_statement_cache_capacity=0");
+    } else {
+        database_url.push_str("?prepared_statement_cache_capacity=0");
+    }
+
     println!("🚀 Connecting to Supabase...");
-    
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(10))
@@ -34,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client_builder = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         .default_headers(headers)
-        .cookie_store(true) // Enables "human" cookie behavior
+        .cookie_store(true)
         .timeout(Duration::from_secs(25));
 
     // Optional: Add Proxy if PROXY_URL is set in AWS Environment
@@ -53,7 +59,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         println!("Checking markets...");
         let events = fetcher.get_unified_events(&client).await;
-        
         if events.is_empty() {
             println!("⚠️ 0 events found. Check API paths or Proxy status.");
         } else {
@@ -64,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let res = sqlx::query(
                     "INSERT INTO prediction_events (
-                        id, title, platform, odds, category, external_id, 
+                        id, title, platform, odds, category, external_id,
                         volume_24h, icon_url, updated_at, status, end_date, outcomes
                     )
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -98,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let top_100 = sqlx::query_as::<Postgres, (f64,)> (
+            let top_100 = sqlx::query_as::<Postgres, (f64,)>(
                 "SELECT odds FROM prediction_events WHERE status = 'active' ORDER BY volume_24h DESC LIMIT 100"
             ).fetch_all(&pool).await;
 
@@ -119,7 +124,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
-        
         println!("💤 Sleeping 30s...");
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
