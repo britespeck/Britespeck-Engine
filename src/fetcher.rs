@@ -127,41 +127,37 @@ impl MarketFetcher {
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
         let mut unified = Vec::new();
 
-        // 1. KALSHI - Corrected URL
-        let k_url = "https://trading-api.kalshi.com";
+        // 1. KALSHI - Using the PUBLIC endpoint (No 401 Unauthorized)
+        let k_url = "https://api.kalshi.com";
         match client.get(k_url).send().await {
             Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
+                if resp.status().is_success() {
                     if let Ok(json) = resp.json::<Value>().await {
-                        if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
-                            println!("📡 DEBUG: Kalshi found {} events", events.len());
-                            for event in events {
-                                let title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                                let ticker = event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("");
-                                let mut outcomes = Vec::new();
-                                if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                                    for m in markets {
-                                        if !is_kalshi_active(m) { continue; }
-                                        outcomes.push(MarketOutcome {
-                                            name: m.get("title").and_then(|v| v.as_str()).unwrap_or("Yes").to_string(),
-                                            price: m.get("last_price").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0,
-                                        });
-                                    }
-                                }
-                                if !outcomes.is_empty() && !ticker.is_empty() {
+                        if let Some(markets) = json.get("markets").and_then(|m| m.as_array()) {
+                            println!("📡 DEBUG: Kalshi found {} markets", markets.len());
+                            for m in markets {
+                                if !is_kalshi_active(m) { continue; }
+                                let title = m.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                                let ticker = m.get("ticker").and_then(|v| v.as_str()).unwrap_or("");
+                                
+                                let outcomes = vec![
+                                    MarketOutcome { name: "Yes".into(), price: m.get("yes_bid").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0 },
+                                    MarketOutcome { name: "No".into(), price: m.get("no_bid").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0 },
+                                ];
+
+                                if !ticker.is_empty() {
                                     unified.push(PredictionEvent {
                                         id: Uuid::new_v4(),
                                         title: title.to_string(),
                                         platform: "Kalshi".to_string(),
                                         odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
-                                        category: map_kalshi_category(event.get("category").and_then(|v| v.as_str()).unwrap_or(""), title).to_string(),
+                                        category: map_kalshi_category(m.get("category").and_then(|v| v.as_str()).unwrap_or(""), title).to_string(),
                                         external_id: ticker.to_string(),
                                         volume_24h: 0.0,
-                                        icon_url: extract_image(event, &["image_url", "thumbnail_url"]),
+                                        icon_url: None,
                                         updated_at: Utc::now(),
                                         status: "active".to_string(),
-                                        end_date: parse_end_date(event, &["settle_date", "expiration_date"]),
+                                        end_date: parse_end_date(m, &["expiration_time"]),
                                         outcomes,
                                     });
                                 }
@@ -169,18 +165,17 @@ impl MarketFetcher {
                         }
                     }
                 } else {
-                    println!("❌ Kalshi API Error: HTTP {}", status);
+                    println!("❌ Kalshi Public API Error: HTTP {}", resp.status());
                 }
             }
             Err(e) => println!("❌ Kalshi Connection Failed: {}", e),
         }
 
-        // 2. POLYMARKET - Corrected URL
+        // 2. POLYMARKET - Corrected path for Gamma API
         let p_url = "https://gamma-api.polymarket.com";
         match client.get(p_url).send().await {
             Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
+                if resp.status().is_success() {
                     if let Ok(markets) = resp.json::<Vec<Value>>().await {
                         println!("📡 DEBUG: Polymarket found {} events", markets.len());
                         for m in markets {
@@ -220,7 +215,7 @@ impl MarketFetcher {
                         }
                     }
                 } else {
-                    println!("❌ Polymarket API Error: HTTP {}", status);
+                    println!("❌ Polymarket API Error: HTTP {}", resp.status());
                 }
             }
             Err(e) => println!("❌ Polymarket Connection Failed: {}", e),
