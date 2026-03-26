@@ -95,20 +95,7 @@ impl MarketFetcher {
                                 }
                             }
                             if !outcomes.is_empty() && !ticker.is_empty() {
-                                unified.push(PredictionEvent { 
-                                    id: Uuid::new_v4(), 
-                                    title: title.to_string(), 
-                                    platform: "Kalshi".to_string(), 
-                                    odds: outcomes.first().map(|o| o.price).unwrap_or(0.5), 
-                                    category: map_kalshi_category(event.get("category").and_then(|v| v.as_str()).unwrap_or(""), title).to_string(), 
-                                    external_id: ticker.to_string(), 
-                                    volume_24h: 0.0, 
-                                    icon_url: extract_image(event, &["image_url", "thumbnail_url"]), 
-                                    updated_at: Utc::now(),
-                                    status: "active".to_string(),
-                                    end_date: parse_end_date(event, &["settle_date", "expiration_date"]), 
-                                    outcomes 
-                                });
+                                unified.push(PredictionEvent { id: Uuid::new_v4(), title: title.to_string(), platform: "Kalshi".to_string(), odds: outcomes.first().map(|o| o.price).unwrap_or(0.5), category: map_kalshi_category(event.get("category").and_then(|v| v.as_str()).unwrap_or(""), title).to_string(), external_id: ticker.to_string(), volume_24h: 0.0, icon_url: extract_image(event, &["image_url", "thumbnail_url"]), updated_at: Utc::now(), status: "active".to_string(), end_date: parse_end_date(event, &["settle_date", "expiration_date"]), outcomes });
                             }
                         }
                     }
@@ -132,20 +119,8 @@ impl MarketFetcher {
                             }
                         }
                         if !outcomes.is_empty() && !ext_id.is_empty() {
-                            unified.push(PredictionEvent { 
-                                id: Uuid::new_v4(), 
-                                title: title.to_string(), 
-                                platform: "Polymarket".to_string(), 
-                                odds: outcomes.first().map(|o| o.price).unwrap_or(0.5), 
-                                category: map_polymarket_category(&m.get("tags").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect()).unwrap_or_default(), title).to_string(), 
-                                external_id: ext_id.to_string(), 
-                                volume_24h: m.get("volume24hr").and_then(|v| v.as_f64()).unwrap_or(0.0), 
-                                icon_url: extract_image(&m, &["image", "icon"]), 
-                                updated_at: Utc::now(),
-                                status: "active".to_string(),
-                                end_date: parse_end_date(&m, &["ends_at"]), 
-                                outcomes 
-                            });
+                            let tags: Vec<String> = m.get("tags").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
+                            unified.push(PredictionEvent { id: Uuid::new_v4(), title: title.to_string(), platform: "Polymarket".to_string(), odds: outcomes.first().map(|o| o.price).unwrap_or(0.5), category: map_polymarket_category(&tags, title).to_string(), external_id: ext_id.to_string(), volume_24h: m.get("volume24hr").and_then(|v| v.as_f64()).unwrap_or(0.0), icon_url: extract_image(&m, &["image", "icon"]), updated_at: Utc::now(), status: "active".to_string(), end_date: parse_end_date(&m, &["ends_at"]), outcomes });
                         }
                     }
                 }
