@@ -127,8 +127,8 @@ impl MarketFetcher {
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
         let mut unified = Vec::new();
 
-        // 1. KALSHI
-        let k_url = "https://api.kalshi.com";
+        // 1. KALSHI - Corrected URL
+        let k_url = "https://trading-api.kalshi.com";
         match client.get(k_url).send().await {
             Ok(resp) => {
                 let status = resp.status();
@@ -175,7 +175,7 @@ impl MarketFetcher {
             Err(e) => println!("❌ Kalshi Connection Failed: {}", e),
         }
 
-        // 2. POLYMARKET
+        // 2. POLYMARKET - Corrected URL
         let p_url = "https://gamma-api.polymarket.com";
         match client.get(p_url).send().await {
             Ok(resp) => {
