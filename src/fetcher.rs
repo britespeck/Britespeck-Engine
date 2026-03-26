@@ -126,13 +126,13 @@ impl MarketFetcher {
     pub fn new() -> Self { Self {} }
 
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
-        // 1. SLEEPER - Maintaining low profile on AWS
-        println!("⏳ Throttling fetch for 5 minutes...");
-        tokio::time::sleep(Duration::from_secs(300)).await;
+        // 1. REVERTED TO 30s Heartbeat (Handled in main.rs loop, so we remove the 5m wait here)
+        println!("🚀 Fetching markets (30s heartbeat active)...");
 
         let mut unified = Vec::new();
 
         // 2. KALSHI (PARENT-CHILD LOGIC)
+        // FIXED URL: Points to the public events endpoint
         let k_url = "https://api.kalshi.com";
         if let Ok(resp) = client.get(k_url).send().await {
             if resp.status().is_success() {
