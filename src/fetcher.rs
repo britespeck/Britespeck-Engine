@@ -128,10 +128,11 @@ impl MarketFetcher {
         let mut unified = Vec::new();
 
         // 1. KALSHI
-        let k_url = "https://api.elections.kalshi.com";
+        let k_url = "https://api.kalshi.com";
         match client.get(k_url).send().await {
             Ok(resp) => {
-                if resp.status().is_success() {
+                let status = resp.status();
+                if status.is_success() {
                     if let Ok(json) = resp.json::<Value>().await {
                         if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
                             println!("📡 DEBUG: Kalshi found {} events", events.len());
@@ -168,7 +169,7 @@ impl MarketFetcher {
                         }
                     }
                 } else {
-                    println!("❌ Kalshi API Error: HTTP {}", resp.status());
+                    println!("❌ Kalshi API Error: HTTP {}", status);
                 }
             }
             Err(e) => println!("❌ Kalshi Connection Failed: {}", e),
@@ -178,7 +179,8 @@ impl MarketFetcher {
         let p_url = "https://gamma-api.polymarket.com";
         match client.get(p_url).send().await {
             Ok(resp) => {
-                if resp.status().is_success() {
+                let status = resp.status();
+                if status.is_success() {
                     if let Ok(markets) = resp.json::<Vec<Value>>().await {
                         println!("📡 DEBUG: Polymarket found {} events", markets.len());
                         for m in markets {
@@ -218,7 +220,7 @@ impl MarketFetcher {
                         }
                     }
                 } else {
-                    println!("❌ Polymarket API Error: HTTP {}", resp.status());
+                    println!("❌ Polymarket API Error: HTTP {}", status);
                 }
             }
             Err(e) => println!("❌ Polymarket Connection Failed: {}", e),
