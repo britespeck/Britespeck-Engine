@@ -2,6 +2,7 @@ use crate::models::{PredictionEvent, MarketOutcome};
 use chrono::Utc;
 use uuid::Uuid;
 use serde_json::Value;
+use std::time::Duration;
 
 pub struct MarketFetcher {}
 
@@ -125,9 +126,13 @@ impl MarketFetcher {
     pub fn new() -> Self { Self {} }
 
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
+        // 1. ADDED SLEEPER - Maintaining low profile on AWS
+        println!("⏳ Throttling fetch for 5 minutes...");
+        tokio::time::sleep(Duration::from_secs(300)).await;
+
         let mut unified = Vec::new();
 
-        // 1. KALSHI - Using specific public markets endpoint
+        // 2. KALSHI - Corrected Public Path
         let k_url = "https://api.kalshi.com";
         match client.get(k_url).send().await {
             Ok(resp) => {
@@ -169,36 +174,40 @@ impl MarketFetcher {
             Err(e) => println!("❌ Kalshi Connection Failed: {}", e),
         }
 
-        // 2. POLYMARKET - Using CLOB (order book) endpoint which is more AWS-friendly
-        let p_url = "https://clob.polymarket.com";
+        // 3. POLYMARKET
+        let p_url = "https://gamma-api.polymarket.com";
         match client.get(p_url).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    if let Ok(markets) = resp.json::<Value>().await {
-                        let list = markets.as_array().or_else(|| markets.get("data").and_then(|d| d.as_array()));
-                        if let Some(markets_array) = list {
-                            println!("📡 DEBUG: Polymarket found {} events", markets_array.len());
-                            for m in markets_array {
-                                if !is_poly_active(m) { continue; }
-                                let title = m.get("question").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                                let ext_id = m.get("condition_id").and_then(|v| v.as_str()).unwrap_or("");
-                                
+                    if let Ok(markets) = resp.json::<Vec<Value>>().await {
+                        println!("📡 DEBUG: Polymarket found {} events", markets.len());
+                        for m in markets {
+                            if !is_poly_active(&m) { continue; }
+                            let title = m.get("question").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                            let ext_id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            
+                            let mut outcomes = Vec::new();
+                            if let (Some(names), Some(prices)) = (m.get("outcomes").and_then(|v| v.as_array()), m.get("outcomePrices").and_then(|v| v.as_array())) {
+                                for (i, n) in names.iter().enumerate() {
+                                    let p = prices.get(i).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.5);
+                                    outcomes.push(MarketOutcome { name: n.as_str().unwrap_or("").to_string(), price: p });
+                                }
+                            }
+
+                            if !outcomes.is_empty() && !ext_id.is_empty() {
                                 unified.push(PredictionEvent {
                                     id: Uuid::new_v4(),
                                     title: title.to_string(),
                                     platform: "Polymarket".to_string(),
-                                    odds: 0.5,
-                                    category: map_polymarket_category(&[], title).to_string(),
+                                    odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
+                                    category: categorize_by_title(title).unwrap_or("global").to_string(),
                                     external_id: ext_id.to_string(),
                                     volume_24h: 0.0,
-                                    icon_url: None,
+                                    icon_url: extract_image(&m, &["image", "icon"]),
                                     updated_at: Utc::now(),
                                     status: "active".to_string(),
-                                    end_date: None,
-                                    outcomes: vec![
-                                        MarketOutcome { name: "Yes".into(), price: 0.5 },
-                                        MarketOutcome { name: "No".into(), price: 0.5 },
-                                    ],
+                                    end_date: parse_end_date(&m, &["ends_at"]),
+                                    outcomes,
                                 });
                             }
                         }
