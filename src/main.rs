@@ -1,11 +1,12 @@
 mod models;
 mod fetcher;
 
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgPoolOptions, Postgres}; // Explicitly import Postgres for query_as
 use std::time::Duration;
 use crate::fetcher::MarketFetcher;
 use std::env;
 use dotenv::dotenv;
+use serde_json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,20 +18,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🚀 Connecting to Supabase...");
     
-    // 2. Build the pool with a timeout so it doesn't hang forever
+    // 2. Build the pool - Using '?' now works because return type is Box<dyn Error>
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(10))
         .connect(&database_url)
-        .await;
-
-    let pool = match pool {
-        Ok(p) => p,
-        Err(e) => {
-            println!("🔥 DB CONNECTION FATAL: {}", e);
-            return Err(Box::new(e));
-        }
-    };
+        .await?;
 
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
@@ -52,8 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for event in &events {
                 let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or_default();
 
-                // 3. Changed 'prediction_events' table name to match your model logic if needed
-                // Added explicit error logging for the SQL execution
                 let res = sqlx::query(
                     "INSERT INTO prediction_events (
                         id, title, platform, odds, category, external_id, 
@@ -90,8 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // BPS-100 Logic
-            let top_100 = sqlx::query_as::<(f64,)> (
+            // 3. FIXED: Added 'Postgres' as the first generic argument to resolve E0107
+            let top_100 = sqlx::query_as::<Postgres, (f64,)> (
                 "SELECT odds FROM prediction_events WHERE status = 'active' ORDER BY volume_24h DESC LIMIT 100"
             ).fetch_all(&pool).await;
 
