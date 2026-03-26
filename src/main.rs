@@ -7,6 +7,7 @@ use crate::fetcher::MarketFetcher;
 use std::env;
 use dotenv::dotenv;
 use serde_json;
+use reqwest::header::{HeaderMap, HeaderValue}; // Added for stealth headers
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,17 +19,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🚀 Connecting to Supabase...");
     
-    // 2. Build the pool - Using '?' now works because return type is Box<dyn Error>
+    // 2. Build the pool
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(10))
         .connect(&database_url)
         .await?;
 
+    // --- STEALTH CLIENT SETUP ---
+    let mut headers = HeaderMap::new();
+    headers.insert("Accept", HeaderValue::from_static("application/json, text/plain, */*"));
+    headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
+    headers.insert("Origin", HeaderValue::from_static("https://polymarket.com"));
+    headers.insert("Referer", HeaderValue::from_static("https://polymarket.com"));
+
     let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-        .timeout(Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        .default_headers(headers)
+        .timeout(Duration::from_secs(20))
         .build()?;
+    // ----------------------------
 
     let fetcher = MarketFetcher::new();
     println!("📈 BPS-100 & Multi-Tab Engine Live!");
@@ -81,7 +91,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // 3. FIXED: Added 'Postgres' as the first generic argument to resolve E0107
             let top_100 = sqlx::query_as::<Postgres, (f64,)> (
                 "SELECT odds FROM prediction_events WHERE status = 'active' ORDER BY volume_24h DESC LIMIT 100"
             ).fetch_all(&pool).await;
@@ -108,3 +117,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
+Use code with caution.
+
+Ready to push this alongside the corrected fetcher.rs paths and see those "0 events" turn into real data?
+
+
+
+
+Ask anything
+
+

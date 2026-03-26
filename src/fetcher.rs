@@ -126,13 +126,12 @@ impl MarketFetcher {
     pub fn new() -> Self { Self {} }
 
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
-        // 1. REVERTED TO 30s Heartbeat (Handled in main.rs loop, so we remove the 5m wait here)
-        println!("🚀 Fetching markets (30s heartbeat active)...");
+        println!("🚀 Fetching markets (Stealth Headers & 30s heartbeat)...");
 
         let mut unified = Vec::new();
 
-        // 2. KALSHI (PARENT-CHILD LOGIC)
-        // FIXED URL: Points to the public events endpoint
+        // 1. KALSHI (PARENT-CHILD LOGIC)
+        // Corrected URL for public events data
         let k_url = "https://api.kalshi.com";
         if let Ok(resp) = client.get(k_url).send().await {
             if resp.status().is_success() {
@@ -175,11 +174,12 @@ impl MarketFetcher {
                     }
                 }
             } else {
-                println!("❌ Kalshi API Error: HTTP {}", resp.status());
+                println!("📡 DEBUG: Kalshi Error {}: {}", resp.status(), k_url);
             }
         }
 
-        // 3. POLYMARKET (PARENT-CHILD LOGIC)
+        // 2. POLYMARKET (PARENT-CHILD LOGIC)
+        // Corrected URL for Discovery/Events data
         let p_url = "https://gamma-api.polymarket.com";
         if let Ok(resp) = client.get(p_url).send().await {
             if resp.status().is_success() {
@@ -229,10 +229,9 @@ impl MarketFetcher {
                     }
                 }
             } else {
-                println!("❌ Polymarket API Error: HTTP {}", resp.status());
+                println!("📡 DEBUG: Polymarket Error {}: {}", resp.status(), p_url);
             }
         }
-
         unified
     }
 }
