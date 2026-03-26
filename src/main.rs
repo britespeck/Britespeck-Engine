@@ -16,7 +16,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
 
-    // Disable prepared statement caching to prevent "already exists" errors
     if database_url.contains('?') {
         database_url.push_str("&prepared_statement_cache_capacity=0");
     } else {
@@ -43,7 +42,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cookie_store(true)
         .timeout(Duration::from_secs(25));
 
-    // Optional: Add Proxy if PROXY_URL is set in AWS Environment
     if let Ok(proxy_url) = env::var("PROXY_URL") {
         println!("🌐 Using Proxy: {}", proxy_url);
         let proxy = reqwest::Proxy::all(proxy_url)?;
@@ -51,7 +49,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let client = client_builder.build()?;
-    // ----------------------------
 
     let fetcher = MarketFetcher::new();
     println!("📈 BPS-100 & Multi-Tab Engine Live!");
@@ -128,3 +125,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
+
