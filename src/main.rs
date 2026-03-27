@@ -1,11 +1,11 @@
 mod models;
 mod fetcher;
 
-use sqlx::postgres::{PgPoolOptions, Postgres, PgConnectOptions}; // Added PgConnectOptions
+use sqlx::postgres::{PgPoolOptions, Postgres, PgConnectOptions};
 use std::time::Duration;
 use crate::fetcher::MarketFetcher;
 use std::env;
-use std::str::FromStr; // Added for parsing the URL
+use std::str::FromStr;
 use dotenv::dotenv;
 use serde_json;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -19,15 +19,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🚀 Connecting to Supabase (Forced Simple Protocol)...");
 
-    // FIXED: Using PgConnectOptions to force statement_cache_capacity to 0
-    // This is the only way to stop the "prepared statement already exists" error on port 6543
+    // This block is the "Silver Bullet" for the Supabase Port 6543 error.
+    // It prevents SQLx from naming prepared statements, which causes the 'already exists' crash.
     let options = PgConnectOptions::from_str(&database_url)?
         .statement_cache_capacity(0); 
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(10))
-        .connect_with(options) // Use connect_with instead of connect
+        .connect_with(options) 
         .await?;
 
     // --- STEALTH CLIENT SETUP ---
@@ -55,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         println!("Checking markets...");
+        // Updated to match your fetcher's method name: fetch_all
         let events = fetcher.fetch_all(&client).await;
         
         if events.is_empty() {
@@ -99,7 +100,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                          outcomes = EXCLUDED.outcomes"
                 );
 
-                // build().persistent(false) is still used as a secondary safety
                 let res = query_builder.build().persistent(false).execute(&pool).await;
 
                 if let Err(e) = res {
