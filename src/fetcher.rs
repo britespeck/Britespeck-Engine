@@ -92,10 +92,13 @@ fn extract_image(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
+/// Extract volume from a FULL market object.
+/// Kalshi uses string-formatted fields like "volume_24h_fp": "1234.00"
 fn extract_market_volume(market: &Value) -> f64 {
     let candidates = [
-        "volume_24h", "volume24h", "dollar_volume",
-        "volume", "dollar_open_interest", "open_interest",
+        "volume_24h_fp", "volume_fp", "dollar_volume",
+        "volume_24h", "volume24h", "volume",
+        "open_interest_fp", "dollar_open_interest", "open_interest",
     ];
     for key in &candidates {
         if let Some(v) = market.get(key) {
@@ -105,9 +108,35 @@ fn extract_market_volume(market: &Value) -> f64 {
             if let Some(n) = v.as_i64() {
                 if n > 0 { return n as f64; }
             }
+            if let Some(s) = v.as_str() {
+                if let Ok(n) = s.parse::<f64>() {
+                    if n > 0.0 { return n; }
+                }
+            }
         }
     }
     0.0
+}
+
+/// Extract a price from a Kalshi market object.
+/// Kalshi uses string-formatted dollar fields like "last_price_dollars": "0.65"
+fn extract_kalshi_price(market: &Value) -> f64 {
+    let candidates = [
+        "last_price_dollars", "yes_bid_dollars", "yes_ask_dollars", "yes_price",
+    ];
+    for key in &candidates {
+        if let Some(v) = market.get(key) {
+            if let Some(n) = v.as_f64() {
+                if n > 0.0 { return n; }
+            }
+            if let Some(s) = v.as_str() {
+                if let Ok(n) = s.parse::<f64>() {
+                    if n > 0.0 { return n; }
+                }
+            }
+        }
+    }
+    0.5
 }
 
 fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
@@ -203,13 +232,6 @@ impl MarketFetcher {
                             .cloned()
                             .unwrap_or_default();
 
-                        if let Some(first) = markets.first() {
-                            if let Some(obj) = first.as_object() {
-                                let keys: Vec<&String> = obj.keys().collect();
-                                println!("🔑 Kalshi FULL market keys for {}: {:?}", event_ticker, keys);
-                            }
-                        }
-
                         let total_vol: f64 = markets
                             .iter()
                             .filter(|m| {
@@ -238,7 +260,6 @@ impl MarketFetcher {
     }
 
     pub async fn fetch_all(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
-
         let mut unified: Vec<PredictionEvent> = Vec::new();
 
         // ─── KALSHI ───────────────────────────────────────────────
@@ -288,12 +309,10 @@ impl MarketFetcher {
                                     event,
                                     &["image_url", "thumbnail_url", "series_image_url"],
                                 );
-                                println!("🖼️ Kalshi {} event-level image: {:?}", ticker, event_image);
 
                                 let icon = self
                                     .get_kalshi_image(&client, &ticker, &event_image)
                                     .await;
-                                println!("🖼️ Kalshi {} final icon: {:?}", ticker, icon);
 
                                 let volume = Self::fetch_kalshi_market_volume(&client, &ticker).await;
 
@@ -317,22 +336,21 @@ impl MarketFetcher {
                                     continue;
                                 }
 
+                                // Pick most contested market (closest to 50/50)
                                 let best_market = active_markets
                                     .iter()
                                     .min_by(|a, b| {
-                                        let pa = a.get("yes_price").and_then(|p| p.as_f64()).unwrap_or(0.5);
-                                        let pb = b.get("yes_price").and_then(|p| p.as_f64()).unwrap_or(0.5);
+                                        let pa = extract_kalshi_price(a);
+                                        let pb = extract_kalshi_price(b);
                                         let da = (pa - 0.5_f64).abs();
                                         let db = (pb - 0.5_f64).abs();
                                         da.partial_cmp(&db).unwrap()
                                     })
                                     .unwrap();
 
-                                let odds = best_market
-                                    .get("yes_price")
-                                    .and_then(|p| p.as_f64())
-                                    .unwrap_or(0.5);
+                                let odds = extract_kalshi_price(best_market);
 
+                                // Build outcomes from top 5 markets
                                 let mut outcomes: Vec<MarketOutcome> = active_markets
                                     .iter()
                                     .take(5)
@@ -340,13 +358,11 @@ impl MarketFetcher {
                                         let name = m
                                             .get("title")
                                             .or_else(|| m.get("subtitle"))
+                                            .or_else(|| m.get("yes_sub_title"))
                                             .and_then(|t| t.as_str())
                                             .unwrap_or("Yes")
                                             .to_string();
-                                        let price = m
-                                            .get("yes_price")
-                                            .and_then(|p| p.as_f64())
-                                            .unwrap_or(0.5);
+                                        let price = extract_kalshi_price(m);
                                         Some(MarketOutcome { name, price })
                                     })
                                     .collect();
