@@ -1,398 +1,141 @@
-use crate::models::{PredictionEvent, MarketOutcome};
+mod models;
+mod fetcher;
 
-use chrono::Utc;
-use uuid::Uuid;
-use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::Mutex;
+use sqlx::postgres::{PgPoolOptions, Postgres};
 use std::time::Duration;
+use crate::fetcher::MarketFetcher;
+use std::env;
+use dotenv::dotenv;
+use serde_json;
+use reqwest::header::{HeaderMap, HeaderValue};
 
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = dotenv();
 
-pub struct MarketFetcher {
-    kalshi_image_cache: Mutex<HashMap<String, Option<String>>>,
-}
+    let mut database_url = env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
 
-
-fn categorize_by_title(title: &str) -> Option<&'static str> {
-    let t = title.to_lowercase();
-    if t.contains("nba") || t.contains("nfl") || t.contains("mlb") || t.contains("nhl")
-        || t.contains("premier league") || t.contains("champions league")
-        || t.contains("world cup") || t.contains("super bowl") || t.contains("playoff")
-        || t.contains("finals") || t.contains("mvp") || t.contains("masters tournament")
-        || t.contains("grand slam") || t.contains("wimbledon") || t.contains("olympics")
-        || t.contains("ufc") || t.contains("boxing") || t.contains("f1 ")
-        || t.contains("formula 1") || t.contains("pga") || t.contains("golf")
-        || t.contains("tennis") || t.contains("soccer") || t.contains("football")
-        || t.contains("basketball") || t.contains("baseball") || t.contains("hockey")
-    {
-        return Some("sports");
-    }
-    if t.contains("president") || t.contains("election") || t.contains("senate")
-        || t.contains("congress") || t.contains("governor") || t.contains("democrat")
-        || t.contains("republican") || t.contains("nomination") || t.contains("prime minister")
-        || t.contains("parliament") || t.contains("vote") || t.contains("impeach")
-        || t.contains("cabinet") || t.contains("political") || t.contains("party")
-    {
-        return Some("politics");
-    }
-    if t.contains("bitcoin") || t.contains("ethereum") || t.contains("btc")
-        || t.contains("eth") || t.contains("crypto") || t.contains("solana")
-        || t.contains("dogecoin") || t.contains("token")
-    {
-        return Some("crypto");
-    }
-    if t.contains("stock") || t.contains("s&p") || t.contains("nasdaq") || t.contains("fed ")
-        || t.contains("interest rate") || t.contains("inflation") || t.contains("gdp")
-        || t.contains("recession") || t.contains("treasury") || t.contains("dow jones")
-        || t.contains("market cap") || t.contains("ipo")
-    {
-        return Some("finance");
-    }
-    if t.contains("ai ") || t.contains("artificial intelligence") || t.contains("openai")
-        || t.contains("google") || t.contains("apple") || t.contains("tesla")
-        || t.contains("spacex") || t.contains("launch") || t.contains("tech")
-    {
-        return Some("tech");
-    }
-    if t.contains("temperature") || t.contains("hurricane") || t.contains("wildfire")
-        || t.contains("climate") || t.contains("weather") || t.contains("earthquake")
-    {
-        return Some("climate");
-    }
-    if t.contains("oscar") || t.contains("grammy") || t.contains("emmy")
-        || t.contains("celebrity") || t.contains("movie") || t.contains("album")
-        || t.contains("streaming") || t.contains("twitter") || t.contains("tiktok")
-    {
-        return Some("culture");
-    }
-    None
-}
-
-
-fn map_kalshi_category(api_category: &str, title: &str) -> &'static str {
-    let from_api = match api_category.to_lowercase().as_str() {
-        "politics"    => Some("politics"),
-        "economics" | "economy" | "financials" | "companies" => Some("finance"),
-        "sports"      => Some("sports"),
-        "culture"     => Some("culture"),
-        "crypto"      => Some("crypto"),
-        "climate" | "weather" => Some("climate"),
-        "tech" | "science" => Some("tech"),
-        _             => None,
-    };
-    from_api.or_else(|| categorize_by_title(title)).unwrap_or("global")
-}
-
-
-fn map_polymarket_category(tags: &[String], title: &str) -> &'static str {
-    let tag = tags.first().map(|t| t.to_lowercase()).unwrap_or_default();
-    let from_tag = match tag.as_str() {
-        "politics" | "elections" | "geopolitics" => Some("politics"),
-        "finance" | "economy" => Some("finance"),
-        "sports"      => Some("sports"),
-        "culture" | "mentions" => Some("culture"),
-        "crypto"      => Some("crypto"),
-        "weather" | "climate" => Some("climate"),
-        "science" | "tech" => Some("tech"),
-        _             => None,
-    };
-    from_tag.or_else(|| categorize_by_title(title)).unwrap_or("global")
-}
-
-
-fn extract_image(obj: &Value, fields: &[&str]) -> Option<String> {
-    for field in fields {
-        if let Some(url) = obj.get(*field).and_then(|v| v.as_str()) {
-            if !url.is_empty() { return Some(url.to_string()); }
-        }
-    }
-    None
-}
-
-
-fn is_kalshi_active(market: &Value) -> bool {
-    let status = market.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    let result = market.get("result").and_then(|v| v.as_str()).unwrap_or("");
-    status != "settled" && status != "closed" && result.is_empty()
-}
-
-
-fn is_poly_active(market: &Value) -> bool {
-    let closed = market.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
-    let active = market.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
-    let resolved = market.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
-    active && !closed && !resolved
-}
-
-
-fn parse_end_date(obj: &Value, fields: &[&str]) -> Option<chrono::DateTime<Utc>> {
-    for field in fields {
-        if let Some(s) = obj.get(*field).and_then(|v| v.as_str()) {
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) { return Some(dt.with_timezone(&Utc)); }
-            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") { return Some(dt.and_utc()); }
-        }
-    }
-    None
-}
-
-
-async fn scrape_kalshi_og_image(client: &reqwest::Client, event_ticker: &str) -> Option<String> {
-    let page_url = format!("https://kalshi.com/markets/{}", event_ticker.to_lowercase());
-    let resp = client.get(&page_url).send().await.ok()?;
-    if !resp.status().is_success() { return None; }
-    let html = resp.text().await.ok()?;
-
-    let marker = "og:image";
-    let pos = html.find(marker)?;
-    let after = &html[pos..];
-    let content_start = after.find("content=\"")? + 9;
-    let content_slice = &after[content_start..];
-    let content_end = content_slice.find('"')?;
-    let url = &content_slice[..content_end];
-
-    if url.starts_with("http") { Some(url.to_string()) } else { None }
-}
-
-
-impl MarketFetcher {
-    pub fn new() -> Self {
-        Self {
-            kalshi_image_cache: Mutex::new(HashMap::new()),
-        }
+    // Connection string fix for Supabase Pooler
+    if database_url.contains('?') {
+        database_url.push_str("&statement_cache_capacity=0");
+    } else {
+        database_url.push_str("?statement_cache_capacity=0");
     }
 
-    async fn get_kalshi_image(&self, client: &reqwest::Client, ticker: &str) -> Option<String> {
-        {
-            let cache = self.kalshi_image_cache.lock().unwrap();
-            if let Some(cached) = cache.get(ticker) {
-                return cached.clone();
-            }
-        }
-        let image = scrape_kalshi_og_image(client, ticker).await;
-        {
-            let mut cache = self.kalshi_image_cache.lock().unwrap();
-            cache.insert(ticker.to_string(), image.clone());
-        }
-        image
+    println!("🚀 Connecting to Supabase...");
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect(&database_url)
+        .await?;
+
+    // --- STEALTH CLIENT SETUP ---
+    let mut headers = HeaderMap::new();
+    headers.insert("Accept", HeaderValue::from_static("application/json, text/plain, */*"));
+    headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
+    headers.insert("Origin", HeaderValue::from_static("https://polymarket.com"));
+    headers.insert("Referer", HeaderValue::from_static("https://polymarket.com"));
+
+    let mut client_builder = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        .default_headers(headers)
+        .cookie_store(true)
+        .timeout(Duration::from_secs(25));
+
+    if let Ok(proxy_url) = env::var("PROXY_URL") {
+        println!("🌐 Using Proxy: {}", proxy_url);
+        let proxy = reqwest::Proxy::all(proxy_url)?;
+        client_builder = client_builder.proxy(proxy);
     }
 
-    pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
-        println!("🚀 Fetching ALL markets (paginated)...");
+    let client = client_builder.build()?;
+    let fetcher = MarketFetcher::new();
+    println!("📈 BPS-100 & Multi-Tab Engine Live!");
 
-        let mut unified = Vec::new();
+    loop {
+        println!("Checking markets...");
+        let events = fetcher.get_unified_events(&client).await;
+        
+        if events.is_empty() {
+            println!("⚠️ 0 events found. Check API paths or Proxy status.");
+        } else {
+            let total_events = events.len();
+            println!("💎 Syncing {} active events in bulk chunks...", total_events);
 
-        // ═══════════════════════════════════════════════════════════
-        // 1. KALSHI — Paginate through ALL open events
-        // ═══════════════════════════════════════════════════════════
-        let kalshi_client = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-            .timeout(Duration::from_secs(25))
-            .build()
-            .unwrap_or_else(|_| client.clone());
+            // --- BULK UPSERT LOGIC (SUPABASE OPTIMIZED) ---
+            // We chunk into 400 events to stay under Postgres parameter limits
+            for chunk in events.chunks(400) {
+                let mut query_builder: sqlx::QueryBuilder<Postgres> = sqlx::QueryBuilder::new(
+                    "INSERT INTO prediction_events (
+                        id, title, platform, odds, category, external_id,
+                        volume_24h, icon_url, updated_at, status, end_date, outcomes
+                    ) "
+                );
 
-        let mut kalshi_cursor: Option<String> = None;
-        let mut kalshi_total = 0u32;
+                query_builder.push_values(chunk, |mut b, event| {
+                    let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or_default();
+                    b.push_bind(event.id)
+                     .push_bind(&event.title)
+                     .push_bind(&event.platform)
+                     .push_bind(event.odds)
+                     .push_bind(&event.category)
+                     .push_bind(&event.external_id)
+                     .push_bind(event.volume_24h)
+                     .push_bind(&event.icon_url)
+                     .push_bind(event.updated_at)
+                     .push_bind(&event.status)
+                     .push_bind(event.end_date)
+                     .push_bind(outcomes_json);
+                });
 
-        loop {
-            let url = match &kalshi_cursor {
-                Some(cursor) => format!(
-                    "https://api.elections.kalshi.com/trade-api/v2/events?limit=200&status=open&with_nested_markets=true&cursor={}",
-                    cursor
-                ),
-                None => "https://api.elections.kalshi.com/trade-api/v2/events?limit=200&status=open&with_nested_markets=true".to_string(),
-            };
+                query_builder.push(
+                    " ON CONFLICT (external_id) DO UPDATE
+                     SET odds = EXCLUDED.odds,
+                         category = EXCLUDED.category,
+                         volume_24h = EXCLUDED.volume_24h,
+                         icon_url = EXCLUDED.icon_url,
+                         updated_at = EXCLUDED.updated_at,
+                         status = EXCLUDED.status,
+                         end_date = EXCLUDED.end_date,
+                         outcomes = EXCLUDED.outcomes"
+                );
 
-            match kalshi_client.get(&url).send().await {
-                Ok(resp) => {
-                    if !resp.status().is_success() {
-                        println!("❌ Kalshi HTTP {}", resp.status());
-                        break;
-                    }
-                    match resp.json::<Value>().await {
-                        Ok(json) => {
-                            let events = json.get("events").and_then(|e| e.as_array());
-                            let batch_count = events.map(|e| e.len()).unwrap_or(0);
+                // .persistent(false) prevents the "prepared statement already exists" error
+                let res = query_builder.build().persistent(false).execute(&pool).await;
 
-                            if let Some(events) = events {
-                                for event in events {
-                                    let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                                    let ticker = event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("");
-                                    let api_category = event.get("category").and_then(|v| v.as_str()).unwrap_or("general");
-
-                                    let mut outcomes = Vec::new();
-                                    let mut kalshi_volume: f64 = 0.0;
-
-                                    if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                                        for m in markets {
-                                            if !is_kalshi_active(m) { continue; }
-
-                                            // Sum volume from each market
-                                            kalshi_volume += m.get("volume_24h")
-                                                .and_then(|v| v.as_f64())
-                                                .or_else(|| m.get("volume").and_then(|v| v.as_f64()))
-                                                .unwrap_or(0.0);
-
-                                            let price = m.get("last_price").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0;
-                                            outcomes.push(MarketOutcome {
-                                                name: m.get("title").and_then(|v| v.as_str()).unwrap_or("Outcome").to_string(),
-                                                price,
-                                            });
-                                        }
-                                    }
-
-                                    if !outcomes.is_empty() && !ticker.is_empty() {
-                                        let mut icon = extract_image(event, &["image_url", "thumbnail_url"]);
-                                        if icon.is_none() {
-                                            icon = self.get_kalshi_image(&kalshi_client, ticker).await;
-                                        }
-
-                                        unified.push(PredictionEvent {
-                                            id: Uuid::new_v4(),
-                                            title: event_title.to_string(),
-                                            platform: "Kalshi".to_string(),
-                                            odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
-                                            category: map_kalshi_category(api_category, event_title).to_string(),
-                                            external_id: ticker.to_string(),
-                                            volume_24h: kalshi_volume,
-                                            icon_url: icon,
-                                            updated_at: Utc::now(),
-                                            status: "active".to_string(),
-                                            end_date: parse_end_date(event, &["strike_date", "expiration_time"]),
-                                            outcomes,
-                                        });
-                                    }
-                                }
-                            }
-
-                            kalshi_total += batch_count as u32;
-
-                            let next_cursor = json.get("cursor").and_then(|v| v.as_str()).map(|s| s.to_string());
-                            if batch_count < 200 || next_cursor.is_none() || next_cursor.as_deref() == Some("") {
-                                println!("📡 Kalshi total: {} events (done)", kalshi_total);
-                                break;
-                            }
-                            kalshi_cursor = next_cursor;
-                            println!("📡 Kalshi page fetched: {} events so far...", kalshi_total);
-                        },
-                        Err(e) => {
-                            println!("❌ Kalshi JSON parse error: {}", e);
-                            break;
-                        }
-                    }
-                },
-                Err(e) => {
-                    println!("❌ Kalshi connection failed: {}", e);
-                    break;
+                if let Err(e) = res {
+                    println!("❌ Bulk SQL Error on chunk: {}", e);
                 }
             }
-        }
 
-        // ═══════════════════════════════════════════════════════════
-        // 2. POLYMARKET — Paginate using offset
-        // ═══════════════════════════════════════════════════════════
-        let mut poly_offset: u32 = 0;
-        let mut poly_total: u32 = 0;
-        let poly_limit: u32 = 200;
+            // --- BPS-100 CALCULATION ---
+            let top_100 = sqlx::query_as::<Postgres, (f64,)>(
+                "SELECT odds FROM prediction_events WHERE status = 'active' ORDER BY volume_24h DESC LIMIT 100"
+            )
+            .persistent(false)
+            .fetch_all(&pool).await;
 
-        loop {
-            let url = format!(
-                "https://gamma-api.polymarket.com/events?limit={}&offset={}&active=true&closed=false",
-                poly_limit, poly_offset
-            );
+            match top_100 {
+                Ok(rows) if !rows.is_empty() => {
+                    let sum: f64 = rows.iter().map(|row| row.0).sum();
+                    let index_value = sum / rows.len() as f64;
 
-            match client.get(&url).send().await {
-                Ok(resp) => {
-                    if !resp.status().is_success() {
-                        println!("❌ Polymarket HTTP {}", resp.status());
-                        break;
-                    }
-                    match resp.json::<Value>().await {
-                        Ok(json) => {
-                            let events_list = json.as_array().or_else(|| json.get("data").and_then(|d| d.as_array()));
-                            let batch_count = events_list.map(|e| e.len()).unwrap_or(0);
+                    let _ = sqlx::query("INSERT INTO index_history (value, market_count) VALUES ($1, $2)")
+                        .persistent(false)
+                        .bind(index_value)
+                        .bind(rows.len() as i32)
+                        .execute(&pool)
+                        .await;
 
-                            if let Some(events) = events_list {
-                                for event in events {
-                                    if !is_poly_active(event) { continue; }
-
-                                    let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                                    let mother_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
-
-                                    let tags: Vec<String> = event.get("tags")
-                                        .and_then(|v| v.as_array())
-                                        .map(|arr| arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
-                                        .unwrap_or_default();
-
-                                    let mut outcomes = Vec::new();
-                                    let mut total_volume: f64 = 0.0;
-
-                                    if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                                        for m in markets {
-                                            let price = m.get("outcomePrices")
-                                                .and_then(|p| p.as_str())
-                                                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                                                .and_then(|arr| arr.first().cloned())
-                                                .and_then(|s| s.parse::<f64>().ok())
-                                                .unwrap_or(0.0);
-
-                                            let outcome_name = m.get("groupItemTitle")
-                                                .or_else(|| m.get("question"))
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("Outcome");
-
-                                            total_volume += m.get("volume24hr")
-                                                .and_then(|v| v.as_f64())
-                                                .unwrap_or(0.0);
-
-                                            outcomes.push(MarketOutcome {
-                                                name: outcome_name.to_string(),
-                                                price,
-                                            });
-                                        }
-                                    }
-
-                                    if !outcomes.is_empty() && !mother_id.is_empty() {
-                                        unified.push(PredictionEvent {
-                                            id: Uuid::new_v4(),
-                                            title: event_title.to_string(),
-                                            platform: "Polymarket".to_string(),
-                                            odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
-                                            category: map_polymarket_category(&tags, event_title).to_string(),
-                                            external_id: mother_id.to_string(),
-                                            volume_24h: total_volume,
-                                            icon_url: extract_image(event, &["imageOptimized", "image", "icon"]),
-                                            updated_at: Utc::now(),
-                                            status: "active".to_string(),
-                                            end_date: parse_end_date(event, &["endDate"]),
-                                            outcomes,
-                                        });
-                                    }
-                                }
-                            }
-
-                            poly_total += batch_count as u32;
-
-                            if batch_count < poly_limit as usize {
-                                println!("📡 Polymarket total: {} events (done)", poly_total);
-                                break;
-                            }
-                            poly_offset += poly_limit;
-                            println!("📡 Polymarket page fetched: {} events so far...", poly_total);
-                        },
-                        Err(e) => {
-                            println!("❌ Polymarket JSON parse error: {}", e);
-                            break;
-                        }
-                    }
+                    println!("📊 BPS-100 INDEX UPDATED: {:.4}", index_value);
                 },
-                Err(e) => {
-                    println!("❌ Polymarket connection failed: {}", e);
-                    break;
-                }
+                Err(e) => println!("❌ BPS-100 Query Error: {}", e),
+                _ => {}
             }
         }
-
-        println!("✅ Total unified events: {}", unified.len());
-        unified
+        
+        println!("💤 Sleeping 30s...");
+        tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
