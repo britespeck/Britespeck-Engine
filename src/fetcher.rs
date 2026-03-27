@@ -1,4 +1,5 @@
 use crate::models::{PredictionEvent, MarketOutcome};
+
 use chrono::Utc;
 use uuid::Uuid;
 use serde_json::Value;
@@ -6,9 +7,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
+
 pub struct MarketFetcher {
     kalshi_image_cache: Mutex<HashMap<String, Option<String>>>,
 }
+
 
 fn categorize_by_title(title: &str) -> Option<&'static str> {
     let t = title.to_lowercase();
@@ -65,6 +68,7 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
     None
 }
 
+
 fn map_kalshi_category(api_category: &str, title: &str) -> &'static str {
     let from_api = match api_category.to_lowercase().as_str() {
         "politics"    => Some("politics"),
@@ -78,6 +82,7 @@ fn map_kalshi_category(api_category: &str, title: &str) -> &'static str {
     };
     from_api.or_else(|| categorize_by_title(title)).unwrap_or("global")
 }
+
 
 fn map_polymarket_category(tags: &[String], title: &str) -> &'static str {
     let tag = tags.first().map(|t| t.to_lowercase()).unwrap_or_default();
@@ -94,6 +99,7 @@ fn map_polymarket_category(tags: &[String], title: &str) -> &'static str {
     from_tag.or_else(|| categorize_by_title(title)).unwrap_or("global")
 }
 
+
 fn extract_image(obj: &Value, fields: &[&str]) -> Option<String> {
     for field in fields {
         if let Some(url) = obj.get(*field).and_then(|v| v.as_str()) {
@@ -103,11 +109,13 @@ fn extract_image(obj: &Value, fields: &[&str]) -> Option<String> {
     None
 }
 
+
 fn is_kalshi_active(market: &Value) -> bool {
     let status = market.get("status").and_then(|v| v.as_str()).unwrap_or("");
     let result = market.get("result").and_then(|v| v.as_str()).unwrap_or("");
     status != "settled" && status != "closed" && result.is_empty()
 }
+
 
 fn is_poly_active(market: &Value) -> bool {
     let closed = market.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -115,6 +123,7 @@ fn is_poly_active(market: &Value) -> bool {
     let resolved = market.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
     active && !closed && !resolved
 }
+
 
 fn parse_end_date(obj: &Value, fields: &[&str]) -> Option<chrono::DateTime<Utc>> {
     for field in fields {
@@ -126,23 +135,24 @@ fn parse_end_date(obj: &Value, fields: &[&str]) -> Option<chrono::DateTime<Utc>>
     None
 }
 
+
 async fn scrape_kalshi_og_image(client: &reqwest::Client, event_ticker: &str) -> Option<String> {
-    let page_url = format!("https://kalshi.com{}", event_ticker.to_lowercase());
+    let page_url = format!("https://kalshi.com/markets/{}", event_ticker.to_lowercase());
     let resp = client.get(&page_url).send().await.ok()?;
     if !resp.status().is_success() { return None; }
     let html = resp.text().await.ok()?;
 
     let marker = "og:image";
-    let pos = html.find(marker).unwrap_or(0);
-    if pos == 0 { return None; }
+    let pos = html.find(marker)?;
     let after = &html[pos..];
-    let content_start = after.find("content=\"").unwrap_or(0) + 9;
+    let content_start = after.find("content=\"")? + 9;
     let content_slice = &after[content_start..];
-    let content_end = content_slice.find('"').unwrap_or(0);
+    let content_end = content_slice.find('"')?;
     let url = &content_slice[..content_end];
 
     if url.starts_with("http") { Some(url.to_string()) } else { None }
 }
+
 
 impl MarketFetcher {
     pub fn new() -> Self {
@@ -168,9 +178,12 @@ impl MarketFetcher {
 
     pub async fn get_unified_events(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
         println!("🚀 Fetching ALL markets (paginated)...");
+
         let mut unified = Vec::new();
 
-        // --- KALSHI ---
+        // ═══════════════════════════════════════════════════════════
+        // 1. KALSHI — Paginate through ALL open events
+        // ═══════════════════════════════════════════════════════════
         let kalshi_client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             .timeout(Duration::from_secs(25))
@@ -182,105 +195,160 @@ impl MarketFetcher {
 
         loop {
             let url = match &kalshi_cursor {
-                Some(cursor) => format!("https://api.elections.kalshi.com{}", cursor),
-                None => "https://api.elections.kalshi.com".to_string(),
+                Some(cursor) => format!(
+                    "https://api.elections.kalshi.com/trade-api/v2/events?limit=200&status=open&with_nested_markets=true&cursor={}",
+                    cursor
+                ),
+                None => "https://api.elections.kalshi.com/trade-api/v2/events?limit=200&status=open&with_nested_markets=true".to_string(),
             };
 
             match kalshi_client.get(&url).send().await {
                 Ok(resp) => {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        if let Some(events) = json.get("events").and_then(|e| e.as_array()) {
-                            for event in events {
-                                let mut outcomes = Vec::new();
-                                let mut kalshi_volume: f64 = 0.0;
-                                if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                                    for m in markets {
-                                        if !is_kalshi_active(m) { continue; }
-                                        kalshi_volume += m.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                        let price = m.get("last_price").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0;
-                                        outcomes.push(MarketOutcome {
-                                            name: m.get("title").and_then(|v| v.as_str()).unwrap_or("Outcome").to_string(),
-                                            price,
+                    if !resp.status().is_success() {
+                        println!("❌ Kalshi HTTP {}", resp.status());
+                        break;
+                    }
+                    match resp.json::<Value>().await {
+                        Ok(json) => {
+                            let events = json.get("events").and_then(|e| e.as_array());
+                            let batch_count = events.map(|e| e.len()).unwrap_or(0);
+
+                            if let Some(events) = events {
+                                for event in events {
+                                    let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                                    let ticker = event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("");
+                                    let api_category = event.get("category").and_then(|v| v.as_str()).unwrap_or("general");
+
+                                    let mut outcomes = Vec::new();
+                                    let mut kalshi_volume: f64 = 0.0;
+
+                                    if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
+                                        for m in markets {
+                                            if !is_kalshi_active(m) { continue; }
+
+                                            // Sum volume from each market
+                                            kalshi_volume += m.get("volume_24h")
+                                                .and_then(|v| v.as_f64())
+                                                .or_else(|| m.get("volume").and_then(|v| v.as_f64()))
+                                                .unwrap_or(0.0);
+
+                                            let price = m.get("last_price").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0;
+                                            outcomes.push(MarketOutcome {
+                                                name: m.get("title").and_then(|v| v.as_str()).unwrap_or("Outcome").to_string(),
+                                                price,
+                                            });
+                                        }
+                                    }
+
+                                    if !outcomes.is_empty() && !ticker.is_empty() {
+                                        let mut icon = extract_image(event, &["image_url", "thumbnail_url"]);
+                                        if icon.is_none() {
+                                            icon = self.get_kalshi_image(&kalshi_client, ticker).await;
+                                        }
+
+                                        unified.push(PredictionEvent {
+                                            id: Uuid::new_v4(),
+                                            title: event_title.to_string(),
+                                            platform: "Kalshi".to_string(),
+                                            odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
+                                            category: map_kalshi_category(api_category, event_title).to_string(),
+                                            external_id: ticker.to_string(),
+                                            volume_24h: kalshi_volume,
+                                            icon_url: icon,
+                                            updated_at: Utc::now(),
+                                            status: "active".to_string(),
+                                            end_date: parse_end_date(event, &["strike_date", "expiration_time"]),
+                                            outcomes,
                                         });
                                     }
                                 }
-                                let ticker = event.get("event_ticker").and_then(|v| v.as_str()).unwrap_or("");
-                                let title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
-                                if !outcomes.is_empty() && !ticker.is_empty() {
-                                    unified.push(PredictionEvent {
-                                        id: Uuid::new_v4(), title: title.to_string(), platform: "Kalshi".to_string(),
-                                        odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
-                                        category: map_kalshi_category(event.get("category").and_then(|v| v.as_str()).unwrap_or("general"), title).to_string(),
-                                        external_id: ticker.to_string(), volume_24h: kalshi_volume,
-                                        icon_url: self.get_kalshi_image(&kalshi_client, ticker).await,
-                                        updated_at: Utc::now(), status: "active".to_string(),
-                                        end_date: parse_end_date(event, &["strike_date", "expiration_time"]),
-                                        outcomes,
-                                    });
-                                }
                             }
-                            kalshi_total += events.len() as u32;
-                            kalshi_cursor = json.get("cursor").and_then(|v| v.as_str()).map(|s| s.to_string());
-                            if events.len() < 200 || kalshi_cursor.is_none() { break; }
-                        } else { break; }
-                    } else { break; }
+
+                            kalshi_total += batch_count as u32;
+
+                            let next_cursor = json.get("cursor").and_then(|v| v.as_str()).map(|s| s.to_string());
+                            if batch_count < 200 || next_cursor.is_none() || next_cursor.as_deref() == Some("") {
+                                println!("📡 Kalshi total: {} events (done)", kalshi_total);
+                                break;
+                            }
+                            kalshi_cursor = next_cursor;
+                            println!("📡 Kalshi page fetched: {} events so far...", kalshi_total);
+                        },
+                        Err(e) => {
+                            println!("❌ Kalshi JSON parse error: {}", e);
+                            break;
+                        }
+                    }
                 },
-                Err(_) => break,
+                Err(e) => {
+                    println!("❌ Kalshi connection failed: {}", e);
+                    break;
+                }
             }
         }
 
-        // --- POLYMARKET ---
+        // ═══════════════════════════════════════════════════════════
+        // 2. POLYMARKET — Paginate using offset
+        // ═══════════════════════════════════════════════════════════
         let mut poly_offset: u32 = 0;
         let mut poly_total: u32 = 0;
         let poly_limit: u32 = 200;
 
         loop {
-            let url = format!("https://gamma-api.polymarket.com{}&offset={}&active=true&closed=false", poly_limit, poly_offset);
+            let url = format!(
+                "https://gamma-api.polymarket.com/events?limit={}&offset={}&active=true&closed=false",
+                poly_limit, poly_offset
+            );
+
             match client.get(&url).send().await {
                 Ok(resp) => {
-                    if let Ok(events) = resp.json::<Vec<Value>>().await {
-                        let batch_count = events.len();
-                        for event in &events {
-                            if !is_poly_active(event) { continue; }
-                            let mother_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                            let mut outcomes = Vec::new();
-                            let mut total_volume: f64 = 0.0;
-                            if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                                for m in markets {
-                                    total_volume += m.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                    if let Some(prices) = m.get("outcomePrices").and_then(|p| p.as_array()) {
-                                        for p in prices {
-                                            outcomes.push(MarketOutcome { 
-                                                name: "Outcome".to_string(), 
-                                                price: p.as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.5) 
+                    if !resp.status().is_success() {
+                        println!("❌ Polymarket HTTP {}", resp.status());
+                        break;
+                    }
+                    match resp.json::<Value>().await {
+                        Ok(json) => {
+                            let events_list = json.as_array().or_else(|| json.get("data").and_then(|d| d.as_array()));
+                            let batch_count = events_list.map(|e| e.len()).unwrap_or(0);
+
+                            if let Some(events) = events_list {
+                                for event in events {
+                                    if !is_poly_active(event) { continue; }
+
+                                    let event_title = event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                                    let mother_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+
+                                    let tags: Vec<String> = event.get("tags")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
+                                        .unwrap_or_default();
+
+                                    let mut outcomes = Vec::new();
+                                    let mut total_volume: f64 = 0.0;
+
+                                    if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
+                                        for m in markets {
+                                            let price = m.get("outcomePrices")
+                                                .and_then(|p| p.as_str())
+                                                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                                                .and_then(|arr| arr.first().cloned())
+                                                .and_then(|s| s.parse::<f64>().ok())
+                                                .unwrap_or(0.0);
+
+                                            let outcome_name = m.get("groupItemTitle")
+                                                .or_else(|| m.get("question"))
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("Outcome");
+
+                                            total_volume += m.get("volume24hr")
+                                                .and_then(|v| v.as_f64())
+                                                .unwrap_or(0.0);
+
+                                            outcomes.push(MarketOutcome {
+                                                name: outcome_name.to_string(),
+                                                price,
                                             });
                                         }
                                     }
-                                }
-                            }
-                            let tags: Vec<String> = event.get("tags").and_then(|v| v.as_array())
-                                .map(|arr| arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
-                            if !outcomes.is_empty() && !mother_id.is_empty() {
-                                unified.push(PredictionEvent {
-                                    id: Uuid::new_v4(), title: event.get("title").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string(),
-                                    platform: "Polymarket".to_string(), odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
-                                    category: map_polymarket_category(&tags, event.get("title").and_then(|v| v.as_str()).unwrap_or("")).to_string(),
-                                    external_id: mother_id.to_string(), volume_24h: total_volume,
-                                    icon_url: extract_image(event, &["imageOptimized", "image", "icon"]),
-                                    updated_at: Utc::now(), status: "active".to_string(),
-                                    end_date: parse_end_date(event, &["endDate"]), outcomes,
-                                });
-                            }
-                        }
-                        poly_total += batch_count as u32;
-                        if batch_count < poly_limit as usize { break; }
-                        poly_offset += poly_limit;
-                    } else { break; }
-                },
-                Err(_) => break,
-            }
-        }
-        println!("✅ Total unified events: {}", unified.len());
-        unified
-    }
-}
+
+                        
