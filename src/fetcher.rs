@@ -237,11 +237,7 @@ impl MarketFetcher {
         }
     }
 
-    pub async fn fetch_all(&self) -> Vec<PredictionEvent> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap();
+    pub async fn fetch_all(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
 
         let mut unified: Vec<PredictionEvent> = Vec::new();
 

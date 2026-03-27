@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         println!("Checking markets...");
-        let events = fetcher.get_unified_events(&client).await;
+        let events = fetcher.fetch_all(&client).await;
         
         if events.is_empty() {
             println!("⚠️ 0 events found. Check API paths or Proxy status.");
