@@ -127,21 +127,53 @@ fn parse_end_date(obj: &Value, fields: &[&str]) -> Option<chrono::DateTime<Utc>>
     None
 }
 
-async fn scrape_kalshi_og_image(client: &reqwest::Client, event_ticker: &str) -> Option<String> {
-    let page_url = format!("https://kalshi.com/markets/{}", event_ticker.to_lowercase());
-    let resp = client.get(&page_url).send().await.ok()?;
-    if !resp.status().is_success() { return None; }
-    let html = resp.text().await.ok()?;
+/// Fetch image from Kalshi Series API (not scraping — direct API call)
+async fn fetch_kalshi_series_image(client: &reqwest::Client, event_ticker: &str) -> Option<String> {
+    // Extract series ticker: KXMLBALMVP-26 → kxmlbalmvp
+    let series_ticker = event_ticker.split('-').next().unwrap_or(event_ticker).to_lowercase();
+    let url = format!("https://api.elections.kalshi.com/trade-api/v2/series/{}", series_ticker);
 
-    let marker = "og:image";
-    let pos = html.find(marker)?;
-    let after = &html[pos..];
-    let content_start = after.find("content=\"")? + 9;
-    let content_slice = &after[content_start..];
-    let content_end = content_slice.find('"')?;
-    let url = &content_slice[..content_end];
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                println!("🖼️ Kalshi series API {} → HTTP {}", series_ticker, resp.status());
+                return None;
+            }
+            match resp.json::<Value>().await {
+                Ok(json) => {
+                    let image = json.get("series")
+                        .and_then(|s| s.get("image_url"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    println!("🖼️ Kalshi series {} image: {:?}", series_ticker, image);
+                    image
+                },
+                Err(e) => {
+                    println!("🖼️ Kalshi series {} JSON error: {}", series_ticker, e);
+                    None
+                }
+            }
+        },
+        Err(e) => {
+            println!("🖼️ Kalshi series {} request error: {}", series_ticker, e);
+            None
+        }
+    }
+}
 
-    if url.starts_with("http") { Some(url.to_string()) } else { None }
+/// Extract volume from a Kalshi market object, trying every known field name
+fn extract_kalshi_volume(market: &Value) -> f64 {
+    // Try specific 24h volume fields first, then total volume, then open_interest as last resort
+    market.get("volume_24h").and_then(|v| v.as_f64())
+        .or_else(|| market.get("volume24h").and_then(|v| v.as_f64()))
+        .or_else(|| market.get("dollar_volume").and_then(|v| v.as_f64()))
+        .or_else(|| market.get("volume").and_then(|v| v.as_f64()))
+        .or_else(|| market.get("dollar_open_interest").and_then(|v| v.as_f64()))
+        .or_else(|| market.get("open_interest").and_then(|v| v.as_f64()))
+        // Sometimes volume is stored as integer cents
+        .or_else(|| market.get("yes_ask").and_then(|_| None::<f64>))
+        .unwrap_or(0.0)
 }
 
 impl MarketFetcher {
@@ -158,7 +190,8 @@ impl MarketFetcher {
                 return cached.clone();
             }
         }
-        let image = scrape_kalshi_og_image(client, ticker).await;
+        // Use series API instead of HTML scraping
+        let image = fetch_kalshi_series_image(client, ticker).await;
         {
             let mut cache = self.kalshi_image_cache.lock().unwrap();
             cache.insert(ticker.to_string(), image.clone());
@@ -182,6 +215,7 @@ impl MarketFetcher {
 
         let mut kalshi_cursor: Option<String> = None;
         let mut kalshi_total = 0u32;
+        let mut kalshi_debug_printed = false;
 
         loop {
             let url = match &kalshi_cursor {
@@ -213,27 +247,24 @@ impl MarketFetcher {
                                     let mut kalshi_volume: f64 = 0.0;
 
                                     if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
-                                        // DEBUG: Print raw volume field names from first market
-                                        if let Some(first_m) = markets.first() {
-                                            println!("🔍 Kalshi raw market keys for {}: volume={:?} volume_24h={:?} volume24h={:?} dollar_volume={:?}",
-                                                ticker,
-                                                first_m.get("volume"),
-                                                first_m.get("volume_24h"),
-                                                first_m.get("volume24h"),
-                                                first_m.get("dollar_volume"),
-                                            );
+                                        // DEBUG: Print ALL available keys from first market (only once)
+                                        if !kalshi_debug_printed {
+                                            if let Some(first_m) = markets.first() {
+                                                if let Some(obj) = first_m.as_object() {
+                                                    let keys: Vec<&String> = obj.keys().collect();
+                                                    println!("🔑 Kalshi ALL market keys: {:?}", keys);
+                                                    // Also print the full first market JSON for inspection
+                                                    println!("📋 Kalshi sample market JSON: {}", serde_json::to_string_pretty(first_m).unwrap_or_default());
+                                                }
+                                            }
+                                            kalshi_debug_printed = true;
                                         }
 
                                         for m in markets {
                                             if !is_kalshi_active(m) { continue; }
 
-                                            // Sum volume from each market — try all possible field names
-                                            kalshi_volume += m.get("volume_24h")
-                                                .and_then(|v| v.as_f64())
-                                                .or_else(|| m.get("volume24h").and_then(|v| v.as_f64()))
-                                                .or_else(|| m.get("dollar_volume").and_then(|v| v.as_f64()))
-                                                .or_else(|| m.get("volume").and_then(|v| v.as_f64()))
-                                                .unwrap_or(0.0);
+                                            // Sum volume using comprehensive fallback
+                                            kalshi_volume += extract_kalshi_volume(m);
 
                                             let price = m.get("last_price").and_then(|v| v.as_f64()).unwrap_or(50.0) / 100.0;
                                             outcomes.push(MarketOutcome {
@@ -244,15 +275,12 @@ impl MarketFetcher {
                                     }
 
                                     if !outcomes.is_empty() && !ticker.is_empty() {
-                                        let mut icon = extract_image(event, &["image_url", "thumbnail_url"]);
-                                        println!("🖼️ Kalshi {} icon from API: {:?}", ticker, icon);
+                                        // Try event-level image fields first
+                                        let mut icon = extract_image(event, &["image_url", "thumbnail_url", "image"]);
                                         if icon.is_none() {
+                                            // Fall back to series API
                                             icon = self.get_kalshi_image(&kalshi_client, ticker).await;
-                                            println!("🖼️ Kalshi {} icon from scrape: {:?}", ticker, icon);
                                         }
-
-                                        // Debug: log volume
-                                        println!("💰 Kalshi {} vol: {:.0}", ticker, kalshi_volume);
 
                                         unified.push(PredictionEvent {
                                             id: Uuid::new_v4(),
