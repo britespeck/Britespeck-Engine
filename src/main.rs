@@ -1,10 +1,11 @@
 mod models;
 mod fetcher;
 
-use sqlx::postgres::{PgPoolOptions, Postgres};
+use sqlx::postgres::{PgPoolOptions, Postgres, PgConnectOptions}; // Added PgConnectOptions
 use std::time::Duration;
 use crate::fetcher::MarketFetcher;
 use std::env;
+use std::str::FromStr; // Added for parsing the URL
 use dotenv::dotenv;
 use serde_json;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -13,21 +14,20 @@ use reqwest::header::{HeaderMap, HeaderValue};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
 
-    let mut database_url = env::var("DATABASE_URL")
+    let database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
 
-    // Connection string fix for Supabase Pooler
-    if database_url.contains('?') {
-        database_url.push_str("&statement_cache_capacity=0");
-    } else {
-        database_url.push_str("?statement_cache_capacity=0");
-    }
+    println!("🚀 Connecting to Supabase (Forced Simple Protocol)...");
 
-    println!("🚀 Connecting to Supabase...");
+    // FIXED: Using PgConnectOptions to force statement_cache_capacity to 0
+    // This is the only way to stop the "prepared statement already exists" error on port 6543
+    let options = PgConnectOptions::from_str(&database_url)?
+        .statement_cache_capacity(0); 
+
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(10))
-        .connect(&database_url)
+        .connect_with(options) // Use connect_with instead of connect
         .await?;
 
     // --- STEALTH CLIENT SETUP ---
@@ -63,8 +63,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let total_events = events.len();
             println!("💎 Syncing {} active events in bulk chunks...", total_events);
 
-            // --- BULK UPSERT LOGIC (SUPABASE OPTIMIZED) ---
-            // We chunk into 400 events to stay under Postgres parameter limits
             for chunk in events.chunks(400) {
                 let mut query_builder: sqlx::QueryBuilder<Postgres> = sqlx::QueryBuilder::new(
                     "INSERT INTO prediction_events (
@@ -101,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                          outcomes = EXCLUDED.outcomes"
                 );
 
-                // .persistent(false) prevents the "prepared statement already exists" error
+                // build().persistent(false) is still used as a secondary safety
                 let res = query_builder.build().persistent(false).execute(&pool).await;
 
                 if let Err(e) = res {
