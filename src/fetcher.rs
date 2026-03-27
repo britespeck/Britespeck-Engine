@@ -7,11 +7,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-
 pub struct MarketFetcher {
     kalshi_image_cache: Mutex<HashMap<String, Option<String>>>,
 }
-
 
 fn categorize_by_title(title: &str) -> Option<&'static str> {
     let t = title.to_lowercase();
@@ -68,7 +66,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
     None
 }
 
-
 fn map_kalshi_category(api_category: &str, title: &str) -> &'static str {
     let from_api = match api_category.to_lowercase().as_str() {
         "politics"    => Some("politics"),
@@ -82,7 +79,6 @@ fn map_kalshi_category(api_category: &str, title: &str) -> &'static str {
     };
     from_api.or_else(|| categorize_by_title(title)).unwrap_or("global")
 }
-
 
 fn map_polymarket_category(tags: &[String], title: &str) -> &'static str {
     let tag = tags.first().map(|t| t.to_lowercase()).unwrap_or_default();
@@ -99,7 +95,6 @@ fn map_polymarket_category(tags: &[String], title: &str) -> &'static str {
     from_tag.or_else(|| categorize_by_title(title)).unwrap_or("global")
 }
 
-
 fn extract_image(obj: &Value, fields: &[&str]) -> Option<String> {
     for field in fields {
         if let Some(url) = obj.get(*field).and_then(|v| v.as_str()) {
@@ -109,13 +104,11 @@ fn extract_image(obj: &Value, fields: &[&str]) -> Option<String> {
     None
 }
 
-
 fn is_kalshi_active(market: &Value) -> bool {
     let status = market.get("status").and_then(|v| v.as_str()).unwrap_or("");
     let result = market.get("result").and_then(|v| v.as_str()).unwrap_or("");
     status != "settled" && status != "closed" && result.is_empty()
 }
-
 
 fn is_poly_active(market: &Value) -> bool {
     let closed = market.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -123,7 +116,6 @@ fn is_poly_active(market: &Value) -> bool {
     let resolved = market.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
     active && !closed && !resolved
 }
-
 
 fn parse_end_date(obj: &Value, fields: &[&str]) -> Option<chrono::DateTime<Utc>> {
     for field in fields {
@@ -134,7 +126,6 @@ fn parse_end_date(obj: &Value, fields: &[&str]) -> Option<chrono::DateTime<Utc>>
     }
     None
 }
-
 
 async fn scrape_kalshi_og_image(client: &reqwest::Client, event_ticker: &str) -> Option<String> {
     let page_url = format!("https://kalshi.com/markets/{}", event_ticker.to_lowercase());
@@ -152,7 +143,6 @@ async fn scrape_kalshi_og_image(client: &reqwest::Client, event_ticker: &str) ->
 
     if url.starts_with("http") { Some(url.to_string()) } else { None }
 }
-
 
 impl MarketFetcher {
     pub fn new() -> Self {
@@ -223,12 +213,25 @@ impl MarketFetcher {
                                     let mut kalshi_volume: f64 = 0.0;
 
                                     if let Some(markets) = event.get("markets").and_then(|m| m.as_array()) {
+                                        // DEBUG: Print raw volume field names from first market
+                                        if let Some(first_m) = markets.first() {
+                                            println!("🔍 Kalshi raw market keys for {}: volume={:?} volume_24h={:?} volume24h={:?} dollar_volume={:?}",
+                                                ticker,
+                                                first_m.get("volume"),
+                                                first_m.get("volume_24h"),
+                                                first_m.get("volume24h"),
+                                                first_m.get("dollar_volume"),
+                                            );
+                                        }
+
                                         for m in markets {
                                             if !is_kalshi_active(m) { continue; }
 
-                                            // Sum volume from each market
+                                            // Sum volume from each market — try all possible field names
                                             kalshi_volume += m.get("volume_24h")
                                                 .and_then(|v| v.as_f64())
+                                                .or_else(|| m.get("volume24h").and_then(|v| v.as_f64()))
+                                                .or_else(|| m.get("dollar_volume").and_then(|v| v.as_f64()))
                                                 .or_else(|| m.get("volume").and_then(|v| v.as_f64()))
                                                 .unwrap_or(0.0);
 
@@ -242,9 +245,14 @@ impl MarketFetcher {
 
                                     if !outcomes.is_empty() && !ticker.is_empty() {
                                         let mut icon = extract_image(event, &["image_url", "thumbnail_url"]);
+                                        println!("🖼️ Kalshi {} icon from API: {:?}", ticker, icon);
                                         if icon.is_none() {
                                             icon = self.get_kalshi_image(&kalshi_client, ticker).await;
+                                            println!("🖼️ Kalshi {} icon from scrape: {:?}", ticker, icon);
                                         }
+
+                                        // Debug: log volume
+                                        println!("💰 Kalshi {} vol: {:.0}", ticker, kalshi_volume);
 
                                         unified.push(PredictionEvent {
                                             id: Uuid::new_v4(),
