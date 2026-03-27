@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
 
-    // Added to help the driver realize we want no caching
+    // Connection string fix for Supabase Pooler
     if database_url.contains('?') {
         database_url.push_str("&statement_cache_capacity=0");
     } else {
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&database_url)
         .await?;
 
-    // --- STEALTH CLIENT SETUP WITH PROXY ---
+    // --- STEALTH CLIENT SETUP ---
     let mut headers = HeaderMap::new();
     headers.insert("Accept", HeaderValue::from_static("application/json, text/plain, */*"));
     headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
@@ -50,7 +50,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let client = client_builder.build()?;
-
     let fetcher = MarketFetcher::new();
     println!("📈 BPS-100 & Multi-Tab Engine Live!");
 
@@ -61,19 +60,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if events.is_empty() {
             println!("⚠️ 0 events found. Check API paths or Proxy status.");
         } else {
-            println!("💎 Syncing {} active events...", events.len());
+            let total_events = events.len();
+            println!("💎 Syncing {} active events in bulk chunks...", total_events);
 
-            for event in &events {
-                let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or_default();
-
-                // FIX: Added .persistent(false) to the main upsert query
-                let res = sqlx::query(
+            // --- BULK UPSERT LOGIC (SUPABASE OPTIMIZED) ---
+            // We chunk into 400 events to stay under Postgres parameter limits
+            for chunk in events.chunks(400) {
+                let mut query_builder: sqlx::QueryBuilder<Postgres> = sqlx::QueryBuilder::new(
                     "INSERT INTO prediction_events (
                         id, title, platform, odds, category, external_id,
                         volume_24h, icon_url, updated_at, status, end_date, outcomes
-                    )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                     ON CONFLICT (external_id) DO UPDATE
+                    ) "
+                );
+
+                query_builder.push_values(chunk, |mut b, event| {
+                    let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or_default();
+                    b.push_bind(event.id)
+                     .push_bind(&event.title)
+                     .push_bind(&event.platform)
+                     .push_bind(event.odds)
+                     .push_bind(&event.category)
+                     .push_bind(&event.external_id)
+                     .push_bind(event.volume_24h)
+                     .push_bind(&event.icon_url)
+                     .push_bind(event.updated_at)
+                     .push_bind(&event.status)
+                     .push_bind(event.end_date)
+                     .push_bind(outcomes_json);
+                });
+
+                query_builder.push(
+                    " ON CONFLICT (external_id) DO UPDATE
                      SET odds = EXCLUDED.odds,
                          category = EXCLUDED.category,
                          volume_24h = EXCLUDED.volume_24h,
@@ -82,29 +99,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                          status = EXCLUDED.status,
                          end_date = EXCLUDED.end_date,
                          outcomes = EXCLUDED.outcomes"
-                )
-                .persistent(false) 
-                .bind(event.id)
-                .bind(&event.title)
-                .bind(&event.platform)
-                .bind(event.odds)
-                .bind(&event.category)
-                .bind(&event.external_id)
-                .bind(event.volume_24h)
-                .bind(&event.icon_url)
-                .bind(event.updated_at)
-                .bind(&event.status)
-                .bind(event.end_date)
-                .bind(outcomes_json)
-                .execute(&pool)
-                .await;
+                );
+
+                // .persistent(false) prevents the "prepared statement already exists" error
+                let res = query_builder.build().persistent(false).execute(&pool).await;
 
                 if let Err(e) = res {
-                    println!("❌ SQL Error on event {}: {}", event.external_id, e);
+                    println!("❌ Bulk SQL Error on chunk: {}", e);
                 }
             }
 
-            // FIX: Added .persistent(false) to the select query
+            // --- BPS-100 CALCULATION ---
             let top_100 = sqlx::query_as::<Postgres, (f64,)>(
                 "SELECT odds FROM prediction_events WHERE status = 'active' ORDER BY volume_24h DESC LIMIT 100"
             )
@@ -116,7 +121,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let sum: f64 = rows.iter().map(|row| row.0).sum();
                     let index_value = sum / rows.len() as f64;
 
-                    // FIX: Added .persistent(false) to the index history insert
                     let _ = sqlx::query("INSERT INTO index_history (value, market_count) VALUES ($1, $2)")
                         .persistent(false)
                         .bind(index_value)
