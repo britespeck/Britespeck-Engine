@@ -351,4 +351,48 @@ impl MarketFetcher {
                                         }
                                     }
 
-                        
+                                    if !outcomes.is_empty() && !mother_id.is_empty() {
+                                        unified.push(PredictionEvent {
+                                            id: Uuid::new_v4(),
+                                            title: event_title.to_string(),
+                                            platform: "Polymarket".to_string(),
+                                            odds: outcomes.first().map(|o| o.price).unwrap_or(0.5),
+                                            category: map_polymarket_category(&tags, event_title).to_string(),
+                                            external_id: mother_id.to_string(),
+                                            volume_24h: total_volume,
+                                            icon_url: extract_image(event, &["imageOptimized", "image", "icon"]),
+                                            updated_at: Utc::now(),
+                                            status: "active".to_string(),
+                                            end_date: parse_end_date(event, &["endDate"]),
+                                            outcomes,
+                                        });
+                                    }
+                                }
+                            }
+
+                            poly_total += batch_count as u32;
+
+                            if batch_count < poly_limit as usize {
+                                println!("📡 Polymarket total: {} events (done)", poly_total);
+                                break;
+                            }
+                            poly_offset += poly_limit;
+                            println!("📡 Polymarket page fetched: {} events so far...", poly_total);
+                        },
+                        Err(e) => {
+                            println!("❌ Polymarket JSON parse error: {}", e);
+                            break;
+                        }
+                    }
+                },
+                Err(e) => {
+                    println!("❌ Polymarket connection failed: {}", e);
+                    break;
+                }
+            }
+        }
+
+        println!("✅ Total unified events: {}", unified.len());
+        unified
+    }
+}
