@@ -1,6 +1,6 @@
 use crate::models::{PredictionEvent, MarketOutcome};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -92,7 +92,6 @@ fn extract_image(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-/// Extract volume from a FULL market object (fetched individually, not nested).
 fn extract_market_volume(market: &Value) -> f64 {
     let candidates = [
         "volume_24h", "volume24h", "dollar_volume",
@@ -101,18 +100,18 @@ fn extract_market_volume(market: &Value) -> f64 {
     for key in &candidates {
         if let Some(v) = market.get(key) {
             if let Some(n) = v.as_f64() {
-                if n > 0.0 {
-                    return n;
-                }
+                if n > 0.0 { return n; }
             }
             if let Some(n) = v.as_i64() {
-                if n > 0 {
-                    return n as f64;
-                }
+                if n > 0 { return n as f64; }
             }
         }
     }
     0.0
+}
+
+fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
+    s.parse::<DateTime<Utc>>().ok()
 }
 
 impl MarketFetcher {
@@ -122,7 +121,6 @@ impl MarketFetcher {
         }
     }
 
-    /// Fetch image from Kalshi Series API (not scraping).
     async fn fetch_kalshi_series_image(
         client: &reqwest::Client,
         event_ticker: &str,
@@ -138,9 +136,7 @@ impl MarketFetcher {
         );
         match client.get(&url).send().await {
             Ok(resp) => {
-                if !resp.status().is_success() {
-                    return None;
-                }
+                if !resp.status().is_success() { return None; }
                 match resp.json::<Value>().await {
                     Ok(json) => {
                         let img = json
@@ -149,10 +145,7 @@ impl MarketFetcher {
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
                             .map(|s| s.to_string());
-                        println!(
-                            "🖼️ Kalshi series API for {}: {:?}",
-                            series_ticker, img
-                        );
+                        println!("🖼️ Kalshi series API for {}: {:?}", series_ticker, img);
                         img
                     }
                     Err(_) => None,
@@ -162,43 +155,32 @@ impl MarketFetcher {
         }
     }
 
-    /// Get Kalshi image: first from event-level API field, then series API, with caching.
     async fn get_kalshi_image(
         &self,
         client: &reqwest::Client,
         event_ticker: &str,
         event_level_image: &Option<String>,
     ) -> Option<String> {
-        // 1. Use event-level image if available
         if let Some(img) = event_level_image {
             if !img.is_empty() {
                 println!("🖼️ Kalshi {} icon from event API: {}", event_ticker, img);
                 return Some(img.clone());
             }
         }
-
-        // 2. Check cache
         {
             let cache = self.kalshi_image_cache.lock().unwrap();
             if let Some(cached) = cache.get(event_ticker) {
                 return cached.clone();
             }
         }
-
-        // 3. Try series API
         let result = Self::fetch_kalshi_series_image(client, event_ticker).await;
-
-        // Cache result
         {
             let mut cache = self.kalshi_image_cache.lock().unwrap();
             cache.insert(event_ticker.to_string(), result.clone());
         }
-
         result
     }
 
-    /// Fetch full market details for an event to get volume.
-    /// Uses GET /trade-api/v2/markets?event_ticker=XXX
     async fn fetch_kalshi_market_volume(
         client: &reqwest::Client,
         event_ticker: &str,
@@ -221,7 +203,6 @@ impl MarketFetcher {
                             .cloned()
                             .unwrap_or_default();
 
-                        // Debug: print keys of first market once
                         if let Some(first) = markets.first() {
                             if let Some(obj) = first.as_object() {
                                 let keys: Vec<&String> = obj.keys().collect();
@@ -307,7 +288,6 @@ impl MarketFetcher {
                                     .and_then(|c| c.as_str())
                                     .unwrap_or("");
 
-                                // ── IMAGE: extract from EVENT level ──
                                 let event_image = extract_image(
                                     event,
                                     &["image_url", "thumbnail_url", "series_image_url"],
@@ -319,10 +299,8 @@ impl MarketFetcher {
                                     .await;
                                 println!("🖼️ Kalshi {} final icon: {:?}", ticker, icon);
 
-                                // ── VOLUME: fetch from /markets endpoint ──
                                 let volume = Self::fetch_kalshi_market_volume(&client, &ticker).await;
 
-                                // ── MARKETS (nested, for price/outcomes) ──
                                 let markets = event
                                     .get("markets")
                                     .and_then(|m| m.as_array())
@@ -343,18 +321,11 @@ impl MarketFetcher {
                                     continue;
                                 }
 
-                                // Pick most contested market (closest to 50/50)
                                 let best_market = active_markets
                                     .iter()
                                     .min_by(|a, b| {
-                                        let pa = a
-                                            .get("yes_price")
-                                            .and_then(|p| p.as_f64())
-                                            .unwrap_or(0.5);
-                                        let pb = b
-                                            .get("yes_price")
-                                            .and_then(|p| p.as_f64())
-                                            .unwrap_or(0.5);
+                                        let pa = a.get("yes_price").and_then(|p| p.as_f64()).unwrap_or(0.5);
+                                        let pb = b.get("yes_price").and_then(|p| p.as_f64()).unwrap_or(0.5);
                                         let da = (pa - 0.5_f64).abs();
                                         let db = (pb - 0.5_f64).abs();
                                         da.partial_cmp(&db).unwrap()
@@ -366,7 +337,6 @@ impl MarketFetcher {
                                     .and_then(|p| p.as_f64())
                                     .unwrap_or(0.5);
 
-                                // Build outcomes from top 5 markets
                                 let mut outcomes: Vec<MarketOutcome> = active_markets
                                     .iter()
                                     .take(5)
@@ -406,31 +376,28 @@ impl MarketFetcher {
                                         }
                                     });
 
-                                // End date from event level
-                                let end_date = event
+                                let end_date: Option<DateTime<Utc>> = event
                                     .get("close_time")
                                     .or_else(|| event.get("expected_expiration_time"))
                                     .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
+                                    .and_then(|s| parse_datetime(s));
 
                                 unified.push(PredictionEvent {
-                                    id: Uuid::new_v4().to_string(),
+                                    id: Uuid::new_v4(),
                                     title,
                                     platform: "Kalshi".to_string(),
                                     odds,
-                                    category: Some(category),
+                                    category,
                                     external_id: ticker.clone(),
-                                    updated_at: Some(Utc::now().to_rfc3339()),
-                                    volume_24h: Some(volume),
+                                    updated_at: Utc::now(),
+                                    volume_24h: volume,
                                     icon_url: icon,
-                                    outcomes: Some(outcomes),
-                                    slug: Some(ticker.to_lowercase()),
-                                    status: Some("active".to_string()),
+                                    outcomes,
+                                    status: "active".to_string(),
                                     end_date,
                                 });
                             }
 
-                            // Pagination
                             kalshi_cursor = json
                                 .get("cursor")
                                 .and_then(|c| c.as_str())
@@ -441,10 +408,7 @@ impl MarketFetcher {
                                 break;
                             }
 
-                            println!(
-                                "📡 Kalshi page fetched: {} events so far...",
-                                unified.len()
-                            );
+                            println!("📡 Kalshi page fetched: {} events so far...", unified.len());
                         }
                         Err(e) => {
                             println!("❌ Kalshi JSON parse error: {}", e);
@@ -484,9 +448,7 @@ impl MarketFetcher {
                         Ok(json) => {
                             let events = match json.as_array() {
                                 Some(arr) => arr.clone(),
-                                None => {
-                                    break;
-                                }
+                                None => { break; }
                             };
 
                             if events.is_empty() {
@@ -499,11 +461,6 @@ impl MarketFetcher {
                                     .and_then(|t| t.as_str())
                                     .unwrap_or("Unknown")
                                     .to_string();
-                                let slug = event
-                                    .get("slug")
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
                                 let ext_id = event
                                     .get("id")
                                     .and_then(|i| i.as_str())
@@ -515,14 +472,12 @@ impl MarketFetcher {
                                     .and_then(|i| i.as_str())
                                     .map(|s| s.to_string());
 
-                                // End date
-                                let end_date = event
+                                let end_date: Option<DateTime<Utc>> = event
                                     .get("endDate")
                                     .or_else(|| event.get("end_date"))
                                     .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
+                                    .and_then(|s| parse_datetime(s));
 
-                                // Nested markets
                                 let markets = event
                                     .get("markets")
                                     .and_then(|m| m.as_array())
@@ -532,14 +487,8 @@ impl MarketFetcher {
                                 let active_markets: Vec<&Value> = markets
                                     .iter()
                                     .filter(|m| {
-                                        let active = m
-                                            .get("active")
-                                            .and_then(|a| a.as_bool())
-                                            .unwrap_or(true);
-                                        let closed = m
-                                            .get("closed")
-                                            .and_then(|c| c.as_bool())
-                                            .unwrap_or(false);
+                                        let active = m.get("active").and_then(|a| a.as_bool()).unwrap_or(true);
+                                        let closed = m.get("closed").and_then(|c| c.as_bool()).unwrap_or(false);
                                         active && !closed
                                     })
                                     .collect();
@@ -548,7 +497,6 @@ impl MarketFetcher {
                                     continue;
                                 }
 
-                                // Volume: sum volume24hr across all active markets
                                 let total_vol: f64 = active_markets
                                     .iter()
                                     .map(|m| {
@@ -563,33 +511,22 @@ impl MarketFetcher {
                                     })
                                     .sum();
 
-                                // Pick best market by volume
                                 let best_market = active_markets
                                     .iter()
                                     .max_by(|a, b| {
-                                        let va = a
-                                            .get("volume24hr")
-                                            .and_then(|v| v.as_f64())
-                                            .unwrap_or(0.0);
-                                        let vb = b
-                                            .get("volume24hr")
-                                            .and_then(|v| v.as_f64())
-                                            .unwrap_or(0.0);
+                                        let va = a.get("volume24hr").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                        let vb = b.get("volume24hr").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                         va.partial_cmp(&vb).unwrap()
                                     })
                                     .unwrap();
 
-                                // Parse outcomePrices (JSON string like "[\"0.65\",\"0.35\"]")
                                 let odds = best_market
                                     .get("outcomePrices")
                                     .and_then(|op| op.as_str())
                                     .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                                    .and_then(|prices| {
-                                        prices.first().and_then(|p| p.parse::<f64>().ok())
-                                    })
+                                    .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
                                     .unwrap_or(0.5);
 
-                                // Build outcomes
                                 let mut outcomes: Vec<MarketOutcome> = active_markets
                                     .iter()
                                     .take(5)
@@ -603,12 +540,8 @@ impl MarketFetcher {
                                         let price = m
                                             .get("outcomePrices")
                                             .and_then(|op| op.as_str())
-                                            .and_then(|s| {
-                                                serde_json::from_str::<Vec<String>>(s).ok()
-                                            })
-                                            .and_then(|prices| {
-                                                prices.first().and_then(|p| p.parse::<f64>().ok())
-                                            })
+                                            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                                            .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
                                             .unwrap_or(0.5);
                                         Some(MarketOutcome { name, price })
                                     })
@@ -657,18 +590,17 @@ impl MarketFetcher {
                                     });
 
                                 unified.push(PredictionEvent {
-                                    id: Uuid::new_v4().to_string(),
+                                    id: Uuid::new_v4(),
                                     title,
                                     platform: "Polymarket".to_string(),
                                     odds,
-                                    category: Some(category),
+                                    category,
                                     external_id: ext_id,
-                                    updated_at: Some(Utc::now().to_rfc3339()),
-                                    volume_24h: Some(total_vol),
+                                    updated_at: Utc::now(),
+                                    volume_24h: total_vol,
                                     icon_url: icon,
-                                    outcomes: Some(outcomes),
-                                    slug: Some(slug),
-                                    status: Some("active".to_string()),
+                                    outcomes,
+                                    status: "active".to_string(),
                                     end_date,
                                 });
 
@@ -680,10 +612,7 @@ impl MarketFetcher {
                             }
 
                             poly_offset += poly_limit;
-                            println!(
-                                "📡 Polymarket page fetched: {} events so far...",
-                                poly_total
-                            );
+                            println!("📡 Polymarket page fetched: {} events so far...", poly_total);
                         }
                         Err(e) => {
                             println!("❌ Polymarket JSON parse error: {}", e);
