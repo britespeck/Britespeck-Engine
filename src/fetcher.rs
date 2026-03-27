@@ -24,7 +24,7 @@ pub struct PredictionEvent {
     pub end_date: Option<DateTime<Utc>>,
     pub outcomes: Vec<MarketOutcome>,
 }
-fetcher.rs — event-level volume for Polymarket + per-outcome volume for both platforms:
+//fetcher.rs — event-level volume for Polymarket + per-outcome volume for both platforms:
 
 
 use crate::models::{PredictionEvent, MarketOutcome};
