@@ -16,10 +16,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
 
+    // Fix for the 13,000+ event "prepared statement already exists" error
     if database_url.contains('?') {
-        database_url.push_str("&prepared_statement_cache_capacity=0");
+        database_url.push_str("&statement_cache_capacity=0");
     } else {
-        database_url.push_str("?prepared_statement_cache_capacity=0");
+        database_url.push_str("?statement_cache_capacity=0");
     }
 
     println!("🚀 Connecting to Supabase...");
@@ -56,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         println!("Checking markets...");
         let events = fetcher.get_unified_events(&client).await;
+        
         if events.is_empty() {
             println!("⚠️ 0 events found. Check API paths or Proxy status.");
         } else {
@@ -121,8 +123,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
+        
         println!("💤 Sleeping 30s...");
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
-
