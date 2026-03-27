@@ -1,3 +1,32 @@
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use chrono::{DateTime, Utc};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MarketOutcome {
+    pub name: String,
+    pub price: f64,
+    pub volume: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PredictionEvent {
+    pub id: Uuid,
+    pub title: String,
+    pub platform: String,
+    pub odds: f64,
+    pub category: String,
+    pub external_id: String,
+    pub volume_24h: f64,
+    pub icon_url: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    pub status: String,
+    pub end_date: Option<DateTime<Utc>>,
+    pub outcomes: Vec<MarketOutcome>,
+}
+fetcher.rs — event-level volume for Polymarket + per-outcome volume for both platforms:
+
+
 use crate::models::{PredictionEvent, MarketOutcome};
 
 use chrono::{DateTime, Utc};
@@ -92,8 +121,7 @@ fn extract_image(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-/// Extract volume from a FULL market object.
-/// Kalshi uses string-formatted fields like "volume_24h_fp": "1234.00"
+/// Extract volume from a market object — handles both numeric and string-encoded fields
 fn extract_market_volume(market: &Value) -> f64 {
     let candidates = [
         "volume_24h_fp", "volume_fp", "dollar_volume",
@@ -118,8 +146,7 @@ fn extract_market_volume(market: &Value) -> f64 {
     0.0
 }
 
-/// Extract a price from a Kalshi market object.
-/// Kalshi uses string-formatted dollar fields like "last_price_dollars": "0.65"
+/// Extract price from a Kalshi market — string-formatted dollar fields
 fn extract_kalshi_price(market: &Value) -> f64 {
     let candidates = [
         "last_price_dollars", "yes_bid_dollars", "yes_ask_dollars", "yes_price",
@@ -137,6 +164,20 @@ fn extract_kalshi_price(market: &Value) -> f64 {
         }
     }
     0.5
+}
+
+/// Extract volume for a single Polymarket nested market
+fn extract_poly_market_volume(market: &Value) -> f64 {
+    let candidates = ["volume24hr", "volume", "volumeNum"];
+    for key in &candidates {
+        if let Some(v) = market.get(key) {
+            if let Some(n) = v.as_f64() { return n; }
+            if let Some(s) = v.as_str() {
+                if let Ok(n) = s.parse::<f64>() { return n; }
+            }
+        }
+    }
+    0.0
 }
 
 fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
@@ -168,14 +209,11 @@ impl MarketFetcher {
                 if !resp.status().is_success() { return None; }
                 match resp.json::<Value>().await {
                     Ok(json) => {
-                        let img = json
-                            .get("series")
+                        json.get("series")
                             .and_then(|s| s.get("image_url"))
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string());
-                        println!("🖼️ Kalshi series API for {}: {:?}", series_ticker, img);
-                        img
+                            .map(|s| s.to_string())
                     }
                     Err(_) => None,
                 }
@@ -192,7 +230,6 @@ impl MarketFetcher {
     ) -> Option<String> {
         if let Some(img) = event_level_image {
             if !img.is_empty() {
-                println!("🖼️ Kalshi {} icon from event API: {}", event_ticker, img);
                 return Some(img.clone());
             }
         }
@@ -210,20 +247,18 @@ impl MarketFetcher {
         result
     }
 
-    async fn fetch_kalshi_market_volume(
+    /// Fetch full market objects for a Kalshi event — returns (total_volume, vec of markets)
+    async fn fetch_kalshi_markets(
         client: &reqwest::Client,
         event_ticker: &str,
-    ) -> f64 {
+    ) -> (f64, Vec<Value>) {
         let url = format!(
             "https://api.elections.kalshi.com/trade-api/v2/markets?event_ticker={}&limit=50",
             event_ticker
         );
         match client.get(&url).send().await {
             Ok(resp) => {
-                if !resp.status().is_success() {
-                    println!("⚠️ Kalshi markets endpoint {} returned {}", event_ticker, resp.status());
-                    return 0.0;
-                }
+                if !resp.status().is_success() { return (0.0, vec![]); }
                 match resp.json::<Value>().await {
                     Ok(json) => {
                         let markets = json
@@ -232,30 +267,23 @@ impl MarketFetcher {
                             .cloned()
                             .unwrap_or_default();
 
-                        let total_vol: f64 = markets
-                            .iter()
+                        let active: Vec<Value> = markets
+                            .into_iter()
                             .filter(|m| {
                                 m.get("status")
                                     .and_then(|s| s.as_str())
                                     .map(|s| s == "active" || s == "open")
                                     .unwrap_or(true)
                             })
-                            .map(|m| extract_market_volume(m))
-                            .sum();
+                            .collect();
 
-                        println!("💰 Kalshi {} vol from /markets: {}", event_ticker, total_vol);
-                        total_vol
+                        let total_vol: f64 = active.iter().map(|m| extract_market_volume(m)).sum();
+                        (total_vol, active)
                     }
-                    Err(e) => {
-                        println!("❌ Kalshi markets JSON parse error for {}: {}", event_ticker, e);
-                        0.0
-                    }
+                    Err(_) => (0.0, vec![]),
                 }
             }
-            Err(e) => {
-                println!("❌ Kalshi markets fetch error for {}: {}", event_ticker, e);
-                0.0
-            }
+            Err(_) => (0.0, vec![]),
         }
     }
 
@@ -285,9 +313,7 @@ impl MarketFetcher {
                                 .cloned()
                                 .unwrap_or_default();
 
-                            if events.is_empty() {
-                                break;
-                            }
+                            if events.is_empty() { break; }
 
                             for event in &events {
                                 let ticker = event
@@ -309,32 +335,13 @@ impl MarketFetcher {
                                     event,
                                     &["image_url", "thumbnail_url", "series_image_url"],
                                 );
+                                let icon = self.get_kalshi_image(&client, &ticker, &event_image).await;
 
-                                let icon = self
-                                    .get_kalshi_image(&client, &ticker, &event_image)
-                                    .await;
+                                // Fetch full market objects with per-market volume
+                                let (total_volume, active_markets) =
+                                    Self::fetch_kalshi_markets(&client, &ticker).await;
 
-                                let volume = Self::fetch_kalshi_market_volume(&client, &ticker).await;
-
-                                let markets = event
-                                    .get("markets")
-                                    .and_then(|m| m.as_array())
-                                    .cloned()
-                                    .unwrap_or_default();
-
-                                let active_markets: Vec<&Value> = markets
-                                    .iter()
-                                    .filter(|m| {
-                                        m.get("status")
-                                            .and_then(|s| s.as_str())
-                                            .map(|s| s == "active" || s == "open")
-                                            .unwrap_or(false)
-                                    })
-                                    .collect();
-
-                                if active_markets.is_empty() {
-                                    continue;
-                                }
+                                if active_markets.is_empty() { continue; }
 
                                 // Pick most contested market (closest to 50/50)
                                 let best_market = active_markets
@@ -350,7 +357,7 @@ impl MarketFetcher {
 
                                 let odds = extract_kalshi_price(best_market);
 
-                                // Build outcomes from top 5 markets
+                                // Build outcomes with per-outcome volume
                                 let mut outcomes: Vec<MarketOutcome> = active_markets
                                     .iter()
                                     .take(5)
@@ -363,7 +370,8 @@ impl MarketFetcher {
                                             .unwrap_or("Yes")
                                             .to_string();
                                         let price = extract_kalshi_price(m);
-                                        Some(MarketOutcome { name, price })
+                                        let volume = extract_market_volume(m);
+                                        Some(MarketOutcome { name, price, volume })
                                     })
                                     .collect();
 
@@ -371,6 +379,7 @@ impl MarketFetcher {
                                     outcomes.push(MarketOutcome {
                                         name: "Yes".to_string(),
                                         price: odds,
+                                        volume: total_volume,
                                     });
                                 }
 
@@ -402,7 +411,7 @@ impl MarketFetcher {
                                     category,
                                     external_id: ticker.clone(),
                                     updated_at: Utc::now(),
-                                    volume_24h: volume,
+                                    volume_24h: total_volume,
                                     icon_url: icon,
                                     outcomes,
                                     status: "active".to_string(),
@@ -416,9 +425,7 @@ impl MarketFetcher {
                                 .map(|s| s.to_string())
                                 .filter(|s| !s.is_empty());
 
-                            if kalshi_cursor.is_none() {
-                                break;
-                            }
+                            if kalshi_cursor.is_none() { break; }
 
                             println!("📡 Kalshi page fetched: {} events so far...", unified.len());
                         }
@@ -445,9 +452,7 @@ impl MarketFetcher {
         let mut poly_total = 0;
 
         loop {
-            if poly_offset >= poly_max {
-                break;
-            }
+            if poly_offset >= poly_max { break; }
 
             let url = format!(
                 "https://gamma-api.polymarket.com/events?closed=false&limit={}&offset={}&order=volume24hr&ascending=false",
@@ -463,9 +468,7 @@ impl MarketFetcher {
                                 None => { break; }
                             };
 
-                            if events.is_empty() {
-                                break;
-                            }
+                            if events.is_empty() { break; }
 
                             for event in &events {
                                 let title = event
@@ -490,6 +493,14 @@ impl MarketFetcher {
                                     .and_then(|v| v.as_str())
                                     .and_then(|s| parse_datetime(s));
 
+                                // ── Event-level volume (the real total) ──
+                                let event_volume: f64 = event
+                                    .get("volume")
+                                    .and_then(|v| {
+                                        v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                                    })
+                                    .unwrap_or(0.0);
+
                                 let markets = event
                                     .get("markets")
                                     .and_then(|m| m.as_array())
@@ -505,29 +516,20 @@ impl MarketFetcher {
                                     })
                                     .collect();
 
-                                if active_markets.is_empty() {
-                                    continue;
-                                }
+                                if active_markets.is_empty() { continue; }
 
-                                let total_vol: f64 = active_markets
-                                    .iter()
-                                    .map(|m| {
-                                        m.get("volume24hr")
-                                            .and_then(|v| v.as_f64())
-                                            .or_else(|| {
-                                                m.get("volume24hr")
-                                                    .and_then(|v| v.as_str())
-                                                    .and_then(|s| s.parse::<f64>().ok())
-                                            })
-                                            .unwrap_or(0.0)
-                                    })
-                                    .sum();
+                                // Fallback: if no event-level volume, sum from markets
+                                let total_vol = if event_volume > 0.0 {
+                                    event_volume
+                                } else {
+                                    active_markets.iter().map(|m| extract_poly_market_volume(m)).sum()
+                                };
 
                                 let best_market = active_markets
                                     .iter()
                                     .max_by(|a, b| {
-                                        let va = a.get("volume24hr").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                        let vb = b.get("volume24hr").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                        let va = extract_poly_market_volume(a);
+                                        let vb = extract_poly_market_volume(b);
                                         va.partial_cmp(&vb).unwrap()
                                     })
                                     .unwrap();
@@ -539,6 +541,7 @@ impl MarketFetcher {
                                     .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
                                     .unwrap_or(0.5);
 
+                                // Build outcomes with per-market volume
                                 let mut outcomes: Vec<MarketOutcome> = active_markets
                                     .iter()
                                     .take(5)
@@ -555,7 +558,8 @@ impl MarketFetcher {
                                             .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
                                             .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
                                             .unwrap_or(0.5);
-                                        Some(MarketOutcome { name, price })
+                                        let volume = extract_poly_market_volume(m);
+                                        Some(MarketOutcome { name, price, volume })
                                     })
                                     .collect();
 
@@ -563,6 +567,7 @@ impl MarketFetcher {
                                     outcomes.push(MarketOutcome {
                                         name: "Yes".to_string(),
                                         price: odds,
+                                        volume: total_vol,
                                     });
                                 }
 
@@ -619,9 +624,7 @@ impl MarketFetcher {
                                 poly_total += 1;
                             }
 
-                            if events.len() < poly_limit as usize {
-                                break;
-                            }
+                            if events.len() < poly_limit as usize { break; }
 
                             poly_offset += poly_limit;
                             println!("📡 Polymarket page fetched: {} events so far...", poly_total);

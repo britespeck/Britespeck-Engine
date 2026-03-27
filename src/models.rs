@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 pub struct MarketOutcome {
     pub name: String,
     pub price: f64,
+    pub volume: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -21,6 +22,5 @@ pub struct PredictionEvent {
     pub updated_at: DateTime<Utc>,
     pub status: String,
     pub end_date: Option<DateTime<Utc>>,
-    // This stores your "March 31st", "April 15th", etc. outcomes
     pub outcomes: Vec<MarketOutcome>,
 }
