@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
 
-    // Fix for the 13,000+ event "prepared statement already exists" error
+    // Added to help the driver realize we want no caching
     if database_url.contains('?') {
         database_url.push_str("&statement_cache_capacity=0");
     } else {
@@ -66,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for event in &events {
                 let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or_default();
 
+                // FIX: Added .persistent(false) to the main upsert query
                 let res = sqlx::query(
                     "INSERT INTO prediction_events (
                         id, title, platform, odds, category, external_id,
@@ -82,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                          end_date = EXCLUDED.end_date,
                          outcomes = EXCLUDED.outcomes"
                 )
+                .persistent(false) 
                 .bind(event.id)
                 .bind(&event.title)
                 .bind(&event.platform)
@@ -102,16 +104,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            // FIX: Added .persistent(false) to the select query
             let top_100 = sqlx::query_as::<Postgres, (f64,)>(
                 "SELECT odds FROM prediction_events WHERE status = 'active' ORDER BY volume_24h DESC LIMIT 100"
-            ).fetch_all(&pool).await;
+            )
+            .persistent(false)
+            .fetch_all(&pool).await;
 
             match top_100 {
                 Ok(rows) if !rows.is_empty() => {
                     let sum: f64 = rows.iter().map(|row| row.0).sum();
                     let index_value = sum / rows.len() as f64;
 
+                    // FIX: Added .persistent(false) to the index history insert
                     let _ = sqlx::query("INSERT INTO index_history (value, market_count) VALUES ($1, $2)")
+                        .persistent(false)
                         .bind(index_value)
                         .bind(rows.len() as i32)
                         .execute(&pool)
