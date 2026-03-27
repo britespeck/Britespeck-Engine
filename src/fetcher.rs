@@ -1,40 +1,12 @@
-use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct MarketOutcome {
-    pub name: String,
-    pub price: f64,
-    pub volume: f64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PredictionEvent {
-    pub id: Uuid,
-    pub title: String,
-    pub platform: String,
-    pub odds: f64,
-    pub category: String,
-    pub external_id: String,
-    pub volume_24h: f64,
-    pub icon_url: Option<String>,
-    pub updated_at: DateTime<Utc>,
-    pub status: String,
-    pub end_date: Option<DateTime<Utc>>,
-    pub outcomes: Vec<MarketOutcome>,
-}
-//fetcher.rs — event-level volume for Polymarket + per-outcome volume for both platforms:
-
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::models::{PredictionEvent, MarketOutcome};
 
-use chrono::{DateTime, Utc};
-use uuid::Uuid;
-use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Duration;
+// event-level volume for Polymarket + per-outcome volume for both platforms
 
 pub struct MarketFetcher {
     kalshi_image_cache: Mutex<HashMap<String, Option<String>>>,
@@ -121,7 +93,6 @@ fn extract_image(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-/// Extract volume from a market object — handles both numeric and string-encoded fields
 fn extract_market_volume(market: &Value) -> f64 {
     let candidates = [
         "volume_24h_fp", "volume_fp", "dollar_volume",
@@ -146,7 +117,6 @@ fn extract_market_volume(market: &Value) -> f64 {
     0.0
 }
 
-/// Extract price from a Kalshi market — string-formatted dollar fields
 fn extract_kalshi_price(market: &Value) -> f64 {
     let candidates = [
         "last_price_dollars", "yes_bid_dollars", "yes_ask_dollars", "yes_price",
@@ -166,7 +136,6 @@ fn extract_kalshi_price(market: &Value) -> f64 {
     0.5
 }
 
-/// Extract volume for a single Polymarket nested market
 fn extract_poly_market_volume(market: &Value) -> f64 {
     let candidates = ["volume24hr", "volume", "volumeNum"];
     for key in &candidates {
@@ -247,7 +216,6 @@ impl MarketFetcher {
         result
     }
 
-    /// Fetch full market objects for a Kalshi event — returns (total_volume, vec of markets)
     async fn fetch_kalshi_markets(
         client: &reqwest::Client,
         event_ticker: &str,
@@ -337,13 +305,11 @@ impl MarketFetcher {
                                 );
                                 let icon = self.get_kalshi_image(&client, &ticker, &event_image).await;
 
-                                // Fetch full market objects with per-market volume
                                 let (total_volume, active_markets) =
                                     Self::fetch_kalshi_markets(&client, &ticker).await;
 
                                 if active_markets.is_empty() { continue; }
 
-                                // Pick most contested market (closest to 50/50)
                                 let best_market = active_markets
                                     .iter()
                                     .min_by(|a, b| {
@@ -357,7 +323,6 @@ impl MarketFetcher {
 
                                 let odds = extract_kalshi_price(best_market);
 
-                                // Build outcomes with per-outcome volume
                                 let mut outcomes: Vec<MarketOutcome> = active_markets
                                     .iter()
                                     .take(5)
@@ -493,7 +458,6 @@ impl MarketFetcher {
                                     .and_then(|v| v.as_str())
                                     .and_then(|s| parse_datetime(s));
 
-                                // ── Event-level volume (the real total) ──
                                 let event_volume: f64 = event
                                     .get("volume")
                                     .and_then(|v| {
@@ -518,7 +482,6 @@ impl MarketFetcher {
 
                                 if active_markets.is_empty() { continue; }
 
-                                // Fallback: if no event-level volume, sum from markets
                                 let total_vol = if event_volume > 0.0 {
                                     event_volume
                                 } else {
@@ -541,7 +504,6 @@ impl MarketFetcher {
                                     .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
                                     .unwrap_or(0.5);
 
-                                // Build outcomes with per-market volume
                                 let mut outcomes: Vec<MarketOutcome> = active_markets
                                     .iter()
                                     .take(5)
