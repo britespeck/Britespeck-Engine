@@ -1,13 +1,9 @@
-[
-package
-]
+[package]
 name = "britespeck_engine"
 version = "0.1.0"
 edition = "2021"
 
-[
-dependencies
-]
+[dependencies]
 axum = "0.7"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
