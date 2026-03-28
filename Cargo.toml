@@ -1,13 +1,10 @@
-[
-package
-]
+cat > Cargo.toml << 'EOF'
+[package]
 name = "britespeck_engine"
 version = "0.1.0"
 edition = "2021"
 
-[
-dependencies
-]
+[dependencies]
 axum = "0.7"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -19,3 +16,4 @@ dotenv = "0.15"
 reqwest = { version = "0.11", features = ["cookies", "json"] }
 regex = "1.12.3"
 urlencoding = "2"
+EOF
