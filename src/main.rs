@@ -19,15 +19,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🚀 Connecting to Supabase (Forced Simple Protocol)...");
 
-    // This block is the "Silver Bullet" for the Supabase Port 6543 error.
-    // It prevents SQLx from naming prepared statements, which causes the 'already exists' crash.
     let options = PgConnectOptions::from_str(&database_url)?
-        .statement_cache_capacity(0); 
+        .statement_cache_capacity(0);
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(10))
-        .connect_with(options) 
+        .connect_with(options)
         .await?;
 
     // --- STEALTH CLIENT SETUP ---
@@ -55,9 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         println!("Checking markets...");
-        // Updated to match your fetcher's method name: fetch_all
         let events = fetcher.fetch_all(&client).await;
-        
+
         if events.is_empty() {
             println!("⚠️ 0 events found. Check API paths or Proxy status.");
         } else {
@@ -68,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut query_builder: sqlx::QueryBuilder<Postgres> = sqlx::QueryBuilder::new(
                     "INSERT INTO prediction_events (
                         id, title, platform, odds, category, external_id,
-                        volume_24h, icon_url, updated_at, status, end_date, outcomes
+                        volume_24h, icon_url, updated_at, status, end_date, outcomes, market_url
                     ) "
                 );
 
@@ -85,7 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      .push_bind(event.updated_at)
                      .push_bind(&event.status)
                      .push_bind(event.end_date)
-                     .push_bind(outcomes_json);
+                     .push_bind(outcomes_json)
+                     .push_bind(&event.market_url);
                 });
 
                 query_builder.push(
@@ -97,7 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                          updated_at = EXCLUDED.updated_at,
                          status = EXCLUDED.status,
                          end_date = EXCLUDED.end_date,
-                         outcomes = EXCLUDED.outcomes"
+                         outcomes = EXCLUDED.outcomes,
+                         market_url = EXCLUDED.market_url"
                 );
 
                 let res = query_builder.build().persistent(false).execute(&pool).await;
@@ -132,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
-        
+
         println!("💤 Sleeping 30s...");
         tokio::time::sleep(Duration::from_secs(30)).await;
     }

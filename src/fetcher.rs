@@ -6,8 +6,6 @@ use std::sync::Mutex;
 
 use crate::models::{PredictionEvent, MarketOutcome};
 
-// event-level volume for Polymarket + per-outcome volume for both platforms
-
 pub struct MarketFetcher {
     kalshi_image_cache: Mutex<HashMap<String, Option<String>>>,
 }
@@ -368,6 +366,12 @@ impl MarketFetcher {
                                     .and_then(|v| v.as_str())
                                     .and_then(|s| parse_datetime(s));
 
+                                // Build direct Kalshi contract URL
+                                let market_url = Some(format!(
+                                    "https://kalshi.com/markets/{}",
+                                    ticker.split('-').next().unwrap_or(&ticker).to_lowercase()
+                                ));
+
                                 unified.push(PredictionEvent {
                                     id: Uuid::new_v4(),
                                     title,
@@ -381,6 +385,7 @@ impl MarketFetcher {
                                     outcomes,
                                     status: "active".to_string(),
                                     end_date,
+                                    market_url,
                                 });
                             }
 
@@ -451,6 +456,21 @@ impl MarketFetcher {
                                     .or_else(|| event.get("icon"))
                                     .and_then(|i| i.as_str())
                                     .map(|s| s.to_string());
+
+                                // Extract slug for direct Polymarket URL
+                                let slug = event
+                                    .get("slug")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s.to_string());
+
+                                // Build direct Polymarket contract URL
+                                let market_url = slug
+                                    .as_ref()
+                                    .map(|s| format!("https://polymarket.com/event/{}", s))
+                                    .or_else(|| Some(format!(
+                                        "https://polymarket.com/markets?query={}",
+                                        urlencoding::encode(&title)
+                                    )));
 
                                 let end_date: Option<DateTime<Utc>> = event
                                     .get("endDate")
@@ -581,6 +601,7 @@ impl MarketFetcher {
                                     outcomes,
                                     status: "active".to_string(),
                                     end_date,
+                                    market_url,
                                 });
 
                                 poly_total += 1;

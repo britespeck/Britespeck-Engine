@@ -23,4 +23,5 @@ pub struct PredictionEvent {
     pub status: String,
     pub end_date: Option<DateTime<Utc>>,
     pub outcomes: Vec<MarketOutcome>,
+    pub market_url: Option<String>,
 }
