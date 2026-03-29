@@ -256,9 +256,11 @@ impl MarketFetcher {
     pub async fn fetch_all(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
         let mut unified: Vec<PredictionEvent> = Vec::new();
 
-        // ─── KALSHI ───────────────────────────────────────────────
+        // ─── KALSHI (with EOF / rate-limit guard) ─────────────────
         let mut kalshi_cursor: Option<String> = None;
         let kalshi_limit = 200;
+        let mut kalshi_retries = 0;
+        let max_kalshi_retries = 3;
 
         loop {
             let mut url = format!(
@@ -271,143 +273,191 @@ impl MarketFetcher {
 
             match client.get(&url).send().await {
                 Ok(resp) => {
-                    match resp.json::<Value>().await {
-                        Ok(json) => {
-                            let events = json
-                                .get("events")
-                                .and_then(|e| e.as_array())
-                                .cloned()
-                                .unwrap_or_default();
+                    let status = resp.status();
 
-                            if events.is_empty() { break; }
-
-                            for event in &events {
-                                let ticker = event
-                                    .get("event_ticker")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let title = event
-                                    .get("title")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("Unknown")
-                                    .to_string();
-                                let category_raw = event
-                                    .get("category")
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("");
-
-                                let event_image = extract_image(
-                                    event,
-                                    &["image_url", "thumbnail_url", "series_image_url"],
-                                );
-                                let icon = self.get_kalshi_image(&client, &ticker, &event_image).await;
-
-                                let (total_volume, active_markets) =
-                                    Self::fetch_kalshi_markets(&client, &ticker).await;
-
-                                if active_markets.is_empty() { continue; }
-
-                                let best_market = active_markets
-                                    .iter()
-                                    .min_by(|a, b| {
-                                        let pa = extract_kalshi_price(a);
-                                        let pb = extract_kalshi_price(b);
-                                        let da = (pa - 0.5_f64).abs();
-                                        let db = (pb - 0.5_f64).abs();
-                                        da.partial_cmp(&db).unwrap()
-                                    })
-                                    .unwrap();
-
-                                let odds = extract_kalshi_price(best_market);
-
-                                let mut outcomes: Vec<MarketOutcome> = active_markets
-                                    .iter()
-                                    .take(5)
-                                    .filter_map(|m| {
-                                        let name = m
-                                            .get("title")
-                                            .or_else(|| m.get("subtitle"))
-                                            .or_else(|| m.get("yes_sub_title"))
-                                            .and_then(|t| t.as_str())
-                                            .unwrap_or("Yes")
-                                            .to_string();
-                                        let price = extract_kalshi_price(m);
-                                        let volume = extract_market_volume(m);
-                                        Some(MarketOutcome { name, price, volume })
-                                    })
-                                    .collect();
-
-                                if outcomes.is_empty() {
-                                    outcomes.push(MarketOutcome {
-                                        name: "Yes".to_string(),
-                                        price: odds,
-                                        volume: total_volume,
-                                    });
-                                }
-
-                                let category = categorize_by_title(&title)
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| {
-                                        match category_raw.to_lowercase().as_str() {
-                                            "politics" => "Politics".to_string(),
-                                            "economics" | "finance" => "Economics".to_string(),
-                                            "tech" | "science" | "technology" => "Tech".to_string(),
-                                            "sports" => "Sports".to_string(),
-                                            "crypto" => "Crypto".to_string(),
-                                            "climate" | "weather" => "Weather".to_string(),
-                                            _ => "Social".to_string(),
-                                        }
-                                    });
-
-                                let end_date: Option<DateTime<Utc>> = event
-                                    .get("close_time")
-                                    .or_else(|| event.get("expected_expiration_time"))
-                                    .and_then(|v| v.as_str())
-                                    .and_then(|s| parse_datetime(s));
-
-                                // Build direct Kalshi contract URL
-                                let market_url = Some(format!(
-                                    "https://kalshi.com/markets/{}",
-                                    ticker.split('-').next().unwrap_or(&ticker).to_lowercase()
-                                ));
-
-                                unified.push(PredictionEvent {
-                                    id: Uuid::new_v4(),
-                                    title,
-                                    platform: "Kalshi".to_string(),
-                                    odds,
-                                    category,
-                                    external_id: ticker.clone(),
-                                    updated_at: Utc::now(),
-                                    volume_24h: total_volume,
-                                    icon_url: icon,
-                                    outcomes,
-                                    status: "active".to_string(),
-                                    end_date,
-                                    market_url,
-                                });
-                            }
-
-                            kalshi_cursor = json
-                                .get("cursor")
-                                .and_then(|c| c.as_str())
-                                .map(|s| s.to_string())
-                                .filter(|s| !s.is_empty());
-
-                            if kalshi_cursor.is_none() { break; }
-
-                            println!("📡 Kalshi page fetched: {} events so far...", unified.len());
-                        }
-                        Err(e) => {
-                            println!("❌ Kalshi JSON parse error: {}", e);
+                    // ── Rate-limit / server error: back off & retry ──
+                    if status == 429 || status.is_server_error() {
+                        kalshi_retries += 1;
+                        if kalshi_retries > max_kalshi_retries {
+                            println!("⚠️ Kalshi rate-limited after {} retries, moving on", max_kalshi_retries);
                             break;
                         }
+                        let wait = 2u64.pow(kalshi_retries);
+                        println!("⏳ Kalshi {} — backing off {}s (attempt {}/{})", status, wait, kalshi_retries, max_kalshi_retries);
+                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                        continue;
                     }
+
+                    // ── Read body as text first to guard against EOF ──
+                    let body = match resp.text().await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            println!("❌ Kalshi body read error: {}", e);
+                            break;
+                        }
+                    };
+
+                    if body.trim().is_empty() {
+                        kalshi_retries += 1;
+                        if kalshi_retries > max_kalshi_retries {
+                            println!("⚠️ Kalshi returned empty body after {} retries", max_kalshi_retries);
+                            break;
+                        }
+                        let wait = 2u64.pow(kalshi_retries);
+                        println!("⏳ Kalshi empty response — retrying in {}s (attempt {}/{})", wait, kalshi_retries, max_kalshi_retries);
+                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                        continue;
+                    }
+
+                    // ── Parse JSON from the body string ──
+                    let json: Value = match serde_json::from_str(&body) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            println!("❌ Kalshi JSON parse error: {} (body len={})", e, body.len());
+                            kalshi_retries += 1;
+                            if kalshi_retries > max_kalshi_retries { break; }
+                            let wait = 2u64.pow(kalshi_retries);
+                            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                            continue;
+                        }
+                    };
+
+                    // Reset retries on success
+                    kalshi_retries = 0;
+
+                    let events = json
+                        .get("events")
+                        .and_then(|e| e.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+
+                    if events.is_empty() { break; }
+
+                    for event in &events {
+                        let ticker = event
+                            .get("event_ticker")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let title = event
+                            .get("title")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("Unknown")
+                            .to_string();
+                        let category_raw = event
+                            .get("category")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("");
+
+                        let event_image = extract_image(
+                            event,
+                            &["image_url", "thumbnail_url", "series_image_url"],
+                        );
+                        let icon = self.get_kalshi_image(&client, &ticker, &event_image).await;
+
+                        let (total_volume, active_markets) =
+                            Self::fetch_kalshi_markets(&client, &ticker).await;
+
+                        if active_markets.is_empty() { continue; }
+
+                        let best_market = active_markets
+                            .iter()
+                            .min_by(|a, b| {
+                                let pa = extract_kalshi_price(a);
+                                let pb = extract_kalshi_price(b);
+                                let da = (pa - 0.5_f64).abs();
+                                let db = (pb - 0.5_f64).abs();
+                                da.partial_cmp(&db).unwrap()
+                            })
+                            .unwrap();
+
+                        let odds = extract_kalshi_price(best_market);
+
+                        let mut outcomes: Vec<MarketOutcome> = active_markets
+                            .iter()
+                            .take(5)
+                            .filter_map(|m| {
+                                let name = m
+                                    .get("title")
+                                    .or_else(|| m.get("subtitle"))
+                                    .or_else(|| m.get("yes_sub_title"))
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("Yes")
+                                    .to_string();
+                                let price = extract_kalshi_price(m);
+                                let volume = extract_market_volume(m);
+                                Some(MarketOutcome { name, price, volume })
+                            })
+                            .collect();
+
+                        if outcomes.is_empty() {
+                            outcomes.push(MarketOutcome {
+                                name: "Yes".to_string(),
+                                price: odds,
+                                volume: total_volume,
+                            });
+                        }
+
+                        let category = categorize_by_title(&title)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| {
+                                match category_raw.to_lowercase().as_str() {
+                                    "politics" => "Politics".to_string(),
+                                    "economics" | "finance" => "Economics".to_string(),
+                                    "tech" | "science" | "technology" => "Tech".to_string(),
+                                    "sports" => "Sports".to_string(),
+                                    "crypto" => "Crypto".to_string(),
+                                    "climate" | "weather" => "Weather".to_string(),
+                                    _ => "Social".to_string(),
+                                }
+                            });
+
+                        let end_date: Option<DateTime<Utc>> = event
+                            .get("close_time")
+                            .or_else(|| event.get("expected_expiration_time"))
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| parse_datetime(s));
+
+                        let market_url = Some(format!(
+                            "https://kalshi.com/markets/{}",
+                            ticker.split('-').next().unwrap_or(&ticker).to_lowercase()
+                        ));
+
+                        unified.push(PredictionEvent {
+                            id: Uuid::new_v4(),
+                            title,
+                            platform: "Kalshi".to_string(),
+                            odds,
+                            category,
+                            external_id: ticker.clone(),
+                            updated_at: Utc::now(),
+                            volume_24h: total_volume,
+                            icon_url: icon,
+                            outcomes,
+                            status: "active".to_string(),
+                            end_date,
+                            market_url,
+                        });
+                    }
+
+                    kalshi_cursor = json
+                        .get("cursor")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty());
+
+                    if kalshi_cursor.is_none() { break; }
+
+                    println!("📡 Kalshi page fetched: {} events so far...", unified.len());
                 }
                 Err(e) => {
                     println!("❌ Kalshi connection failed: {}", e);
-                    break;
+                    kalshi_retries += 1;
+                    if kalshi_retries > max_kalshi_retries { break; }
+                    let wait = 2u64.pow(kalshi_retries);
+                    println!("⏳ Retrying Kalshi in {}s...", wait);
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    continue;
                 }
             }
         }
@@ -457,13 +507,11 @@ impl MarketFetcher {
                                     .and_then(|i| i.as_str())
                                     .map(|s| s.to_string());
 
-                                // Extract slug for direct Polymarket URL
                                 let slug = event
                                     .get("slug")
                                     .and_then(|s| s.as_str())
                                     .map(|s| s.to_string());
 
-                                // Build direct Polymarket contract URL
                                 let market_url = slug
                                     .as_ref()
                                     .map(|s| format!("https://polymarket.com/event/{}", s))
