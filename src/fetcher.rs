@@ -91,30 +91,6 @@ fn extract_image(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-fn extract_market_volume(market: &Value) -> f64 {
-    let candidates = [
-        "volume_24h_fp", "volume_fp", "dollar_volume",
-        "volume_24h", "volume24h", "volume",
-        "open_interest_fp", "dollar_open_interest", "open_interest",
-    ];
-    for key in &candidates {
-        if let Some(v) = market.get(key) {
-            if let Some(n) = v.as_f64() {
-                if n > 0.0 { return n; }
-            }
-            if let Some(n) = v.as_i64() {
-                if n > 0 { return n as f64; }
-            }
-            if let Some(s) = v.as_str() {
-                if let Ok(n) = s.parse::<f64>() {
-                    if n > 0.0 { return n; }
-                }
-            }
-        }
-    }
-    0.0
-}
-
 fn extract_kalshi_price(market: &Value) -> f64 {
     let candidates = [
         "last_price_dollars", "yes_bid_dollars", "yes_ask_dollars", "yes_price",
@@ -132,6 +108,36 @@ fn extract_kalshi_price(market: &Value) -> f64 {
         }
     }
     0.5
+}
+
+fn extract_market_volume(market: &Value) -> f64 {
+    // Try dollar-denominated fields first
+    let dollar_candidates = ["dollar_volume", "volume_24h_fp", "volume_fp"];
+    for key in &dollar_candidates {
+        if let Some(v) = market.get(key) {
+            if let Some(n) = v.as_f64() { if n > 0.0 { return n; } }
+            if let Some(n) = v.as_i64() { if n > 0 { return n as f64; } }
+        }
+    }
+
+    // Otherwise get raw contract volume and convert to dollar estimate
+    let raw_vol_candidates = ["volume_24h", "volume24h", "volume", "open_interest"];
+    let mut raw_vol: f64 = 0.0;
+    for key in &raw_vol_candidates {
+        if let Some(v) = market.get(key) {
+            if let Some(n) = v.as_f64() { if n > 0.0 { raw_vol = n; break; } }
+            if let Some(n) = v.as_i64() { if n > 0 { raw_vol = n as f64; break; } }
+            if let Some(s) = v.as_str() { if let Ok(n) = s.parse::<f64>() { if n > 0.0 { raw_vol = n; break; } } }
+        }
+    }
+
+    if raw_vol > 0.0 {
+        // Kalshi prices are in cents (1-99), so estimate dollar volume
+        let price = extract_kalshi_price(market);
+        return raw_vol * price;
+    }
+
+    0.0
 }
 
 fn extract_poly_market_volume(market: &Value) -> f64 {
@@ -167,26 +173,60 @@ impl MarketFetcher {
             .next()
             .unwrap_or(event_ticker)
             .to_lowercase();
+
+        // Try series API first
         let url = format!(
             "https://api.elections.kalshi.com/trade-api/v2/series/{}",
             series_ticker
         );
         match client.get(&url).send().await {
             Ok(resp) => {
-                if !resp.status().is_success() { return None; }
-                match resp.json::<Value>().await {
-                    Ok(json) => {
-                        json.get("series")
+                if resp.status().is_success() {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(img) = json.get("series")
                             .and_then(|s| s.get("image_url"))
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string())
+                        {
+                            return Some(img.to_string());
+                        }
+                        // Try category image from series
+                        if let Some(img) = json.get("series")
+                            .and_then(|s| s.get("category_image_url"))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                        {
+                            return Some(img.to_string());
+                        }
                     }
-                    Err(_) => None,
                 }
             }
-            Err(_) => None,
+            Err(_) => {}
         }
+
+        // Fallback: try event-level API for image
+        let event_url = format!(
+            "https://api.elections.kalshi.com/trade-api/v2/events/{}",
+            event_ticker
+        );
+        match client.get(&event_url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        if let Some(img) = json.get("event")
+                            .and_then(|e| e.get("image_url"))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                        {
+                            return Some(img.to_string());
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+
+        None
     }
 
     async fn get_kalshi_image(
@@ -313,7 +353,7 @@ impl MarketFetcher {
 
                         let event_image = extract_image(
                             event,
-                            &["image_url", "thumbnail_url", "series_image_url"],
+                            &["image_url", "thumbnail_url", "series_image_url", "category_image_url", "og_image_url"],
                         );
                         let icon = self.get_kalshi_image(kalshi_client, &ticker, &event_image).await;
 
