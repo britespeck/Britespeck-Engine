@@ -86,7 +86,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      .push_bind(&event.market_url);
                 });
 
-                // FIX: Added volume_24h to the UPDATE clause so it actually saves new data
                 query_builder.push(
                     " ON CONFLICT (external_id) DO UPDATE
                      SET odds = EXCLUDED.odds,

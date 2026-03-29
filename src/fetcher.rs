@@ -91,7 +91,6 @@ fn extract_image(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-// FIX: Cleaning strings for f64 parsing to prevent $0 volume
 fn extract_market_volume(market: &Value) -> f64 {
     let candidates = [
         "volume_24h_fp", "volume_fp", "dollar_volume",
@@ -107,8 +106,7 @@ fn extract_market_volume(market: &Value) -> f64 {
                 if n > 0 { return n as f64; }
             }
             if let Some(s) = v.as_str() {
-                let cleaned = s.replace('$', "").replace(',', "");
-                if let Ok(n) = cleaned.parse::<f64>() {
+                if let Ok(n) = s.parse::<f64>() {
                     if n > 0.0 { return n; }
                 }
             }
@@ -127,8 +125,7 @@ fn extract_kalshi_price(market: &Value) -> f64 {
                 if n > 0.0 { return n; }
             }
             if let Some(s) = v.as_str() {
-                let cleaned = s.replace('$', "").replace(',', "");
-                if let Ok(n) = cleaned.parse::<f64>() {
+                if let Ok(n) = s.parse::<f64>() {
                     if n > 0.0 { return n; }
                 }
             }
@@ -143,8 +140,7 @@ fn extract_poly_market_volume(market: &Value) -> f64 {
         if let Some(v) = market.get(key) {
             if let Some(n) = v.as_f64() { return n; }
             if let Some(s) = v.as_str() {
-                let cleaned = s.replace('$', "").replace(',', "");
-                if let Ok(n) = cleaned.parse::<f64>() { return n; }
+                if let Ok(n) = s.parse::<f64>() { return n; }
             }
         }
     }
@@ -172,7 +168,7 @@ impl MarketFetcher {
             .unwrap_or(event_ticker)
             .to_lowercase();
         let url = format!(
-            "https://api.elections.kalshi.com{}",
+            "https://api.elections.kalshi.com/trade-api/v2/series/{}",
             series_ticker
         );
         match client.get(&url).send().await {
@@ -223,7 +219,7 @@ impl MarketFetcher {
         event_ticker: &str,
     ) -> (f64, Vec<Value>) {
         let url = format!(
-            "https://api.elections.kalshi.com{}&limit=50",
+            "https://api.elections.kalshi.com/trade-api/v2/markets?event_ticker={}&limit=50",
             event_ticker
         );
         match client.get(&url).send().await {
@@ -266,7 +262,7 @@ impl MarketFetcher {
 
         loop {
             let mut url = format!(
-                "https://api.elections.kalshi.com{}&status=open&with_nested_markets=true",
+                "https://api.elections.kalshi.com/trade-api/v2/events?limit={}&status=open&with_nested_markets=true",
                 kalshi_limit
             );
             if let Some(ref cursor) = kalshi_cursor {
@@ -277,134 +273,358 @@ impl MarketFetcher {
                 Ok(resp) => {
                     match resp.json::<Value>().await {
                         Ok(json) => {
-                            let events = json.get("events").and_then(|e| e.as_array()).cloned().unwrap_or_default();
+                            let events = json
+                                .get("events")
+                                .and_then(|e| e.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+
                             if events.is_empty() { break; }
 
                             for event in &events {
-                                let ticker = event.get("event_ticker").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                let title = event.get("title").and_then(|t| t.as_str()).unwrap_or("Unknown").to_string();
-                                let category_raw = event.get("category").and_then(|c| c.as_str()).unwrap_or("");
-                                let event_image = extract_image(event, &["image_url", "thumbnail_url", "series_image_url"]);
+                                let ticker = event
+                                    .get("event_ticker")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let title = event
+                                    .get("title")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("Unknown")
+                                    .to_string();
+                                let category_raw = event
+                                    .get("category")
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("");
+
+                                let event_image = extract_image(
+                                    event,
+                                    &["image_url", "thumbnail_url", "series_image_url"],
+                                );
                                 let icon = self.get_kalshi_image(&client, &ticker, &event_image).await;
-                                let (total_volume, active_markets) = Self::fetch_kalshi_markets(&client, &ticker).await;
+
+                                let (total_volume, active_markets) =
+                                    Self::fetch_kalshi_markets(&client, &ticker).await;
 
                                 if active_markets.is_empty() { continue; }
 
-                                let best_market = active_markets.iter().min_by(|a, b| {
-                                    let pa = extract_kalshi_price(a);
-                                    let pb = extract_kalshi_price(b);
-                                    (pa - 0.5_f64).abs().partial_cmp(&(pb - 0.5_f64).abs()).unwrap()
-                                }).unwrap();
+                                let best_market = active_markets
+                                    .iter()
+                                    .min_by(|a, b| {
+                                        let pa = extract_kalshi_price(a);
+                                        let pb = extract_kalshi_price(b);
+                                        let da = (pa - 0.5_f64).abs();
+                                        let db = (pb - 0.5_f64).abs();
+                                        da.partial_cmp(&db).unwrap()
+                                    })
+                                    .unwrap();
 
                                 let odds = extract_kalshi_price(best_market);
-                                let mut outcomes: Vec<MarketOutcome> = active_markets.iter().take(5).filter_map(|m| {
-                                    let name = m.get("title").or_else(|| m.get("subtitle")).or_else(|| m.get("yes_sub_title")).and_then(|t| t.as_str()).unwrap_or("Yes").to_string();
-                                    Some(MarketOutcome { name, price: extract_kalshi_price(m), volume: extract_market_volume(m) })
-                                }).collect();
+
+                                let mut outcomes: Vec<MarketOutcome> = active_markets
+                                    .iter()
+                                    .take(5)
+                                    .filter_map(|m| {
+                                        let name = m
+                                            .get("title")
+                                            .or_else(|| m.get("subtitle"))
+                                            .or_else(|| m.get("yes_sub_title"))
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("Yes")
+                                            .to_string();
+                                        let price = extract_kalshi_price(m);
+                                        let volume = extract_market_volume(m);
+                                        Some(MarketOutcome { name, price, volume })
+                                    })
+                                    .collect();
 
                                 if outcomes.is_empty() {
-                                    outcomes.push(MarketOutcome { name: "Yes".to_string(), price: odds, volume: total_volume });
+                                    outcomes.push(MarketOutcome {
+                                        name: "Yes".to_string(),
+                                        price: odds,
+                                        volume: total_volume,
+                                    });
                                 }
 
-                                let category = categorize_by_title(&title).map(|s| s.to_string()).unwrap_or_else(|| {
-                                    match category_raw.to_lowercase().as_str() {
-                                        "politics" => "Politics".to_string(),
-                                        "economics" | "finance" => "Economics".to_string(),
-                                        "tech" | "science" | "technology" => "Tech".to_string(),
-                                        "sports" => "Sports".to_string(),
-                                        "crypto" => "Crypto".to_string(),
-                                        "climate" | "weather" => "Weather".to_string(),
-                                        _ => "Social".to_string(),
-                                    }
+                                let category = categorize_by_title(&title)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| {
+                                        match category_raw.to_lowercase().as_str() {
+                                            "politics" => "Politics".to_string(),
+                                            "economics" | "finance" => "Economics".to_string(),
+                                            "tech" | "science" | "technology" => "Tech".to_string(),
+                                            "sports" => "Sports".to_string(),
+                                            "crypto" => "Crypto".to_string(),
+                                            "climate" | "weather" => "Weather".to_string(),
+                                            _ => "Social".to_string(),
+                                        }
+                                    });
+
+                                let end_date: Option<DateTime<Utc>> = event
+                                    .get("close_time")
+                                    .or_else(|| event.get("expected_expiration_time"))
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| parse_datetime(s));
+
+                                // Build direct Kalshi contract URL
+                                let market_url = Some(format!(
+                                    "https://kalshi.com/markets/{}",
+                                    ticker.split('-').next().unwrap_or(&ticker).to_lowercase()
+                                ));
+
+                                unified.push(PredictionEvent {
+                                    id: Uuid::new_v4(),
+                                    title,
+                                    platform: "Kalshi".to_string(),
+                                    odds,
+                                    category,
+                                    external_id: ticker.clone(),
+                                    updated_at: Utc::now(),
+                                    volume_24h: total_volume,
+                                    icon_url: icon,
+                                    outcomes,
+                                    status: "active".to_string(),
+                                    end_date,
+                                    market_url,
                                 });
-
-                                let end_date = event.get("close_time").or_else(|| event.get("expected_expiration_time")).and_then(|v| v.as_str()).and_then(parse_datetime);
-                                let market_url = Some(format!("https://kalshi.com{}", ticker.split('-').next().unwrap_or(&ticker).to_lowercase()));
-
-                                unified.push(PredictionEvent { id: Uuid::new_v4(), title, platform: "Kalshi".to_string(), odds, category, external_id: ticker.clone(), updated_at: Utc::now(), volume_24h: total_volume, icon_url: icon, outcomes, status: "active".to_string(), end_date, market_url });
                             }
-                            kalshi_cursor = json.get("cursor").and_then(|c| c.as_str()).map(|s| s.to_string()).filter(|s| !s.is_empty());
+
+                            kalshi_cursor = json
+                                .get("cursor")
+                                .and_then(|c| c.as_str())
+                                .map(|s| s.to_string())
+                                .filter(|s| !s.is_empty());
+
                             if kalshi_cursor.is_none() { break; }
+
+                            println!("📡 Kalshi page fetched: {} events so far...", unified.len());
                         }
-                        Err(e) => { println!("❌ Kalshi JSON parse error: {}", e); break; }
+                        Err(e) => {
+                            println!("❌ Kalshi JSON parse error: {}", e);
+                            break;
+                        }
                     }
                 }
-                Err(e) => { println!("❌ Kalshi connection failed: {}", e); break; }
+                Err(e) => {
+                    println!("❌ Kalshi connection failed: {}", e);
+                    break;
+                }
             }
         }
+
+        let kalshi_count = unified.len();
+        println!("✅ Kalshi events collected: {}", kalshi_count);
 
         // ─── POLYMARKET ───────────────────────────────────────────
         let poly_limit = 100;
         let mut poly_offset = 0;
+        let poly_max = 2000;
         let mut poly_total = 0;
 
         loop {
-            if poly_offset >= 2000 { break; }
-            let url = format!("https://gamma-api.polymarket.com{}&offset={}&order=volume24hr&ascending=false", poly_limit, poly_offset);
+            if poly_offset >= poly_max { break; }
+
+            let url = format!(
+                "https://gamma-api.polymarket.com/events?closed=false&limit={}&offset={}&order=volume24hr&ascending=false",
+                poly_limit, poly_offset
+            );
+
             match client.get(&url).send().await {
                 Ok(resp) => {
                     match resp.json::<Value>().await {
                         Ok(json) => {
-                            let events = json.as_array().cloned().unwrap_or_default();
+                            let events = match json.as_array() {
+                                Some(arr) => arr.clone(),
+                                None => { break; }
+                            };
+
                             if events.is_empty() { break; }
 
                             for event in &events {
-                                let title = event.get("title").and_then(|t| t.as_str()).unwrap_or("Unknown").to_string();
-                                let ext_id = event.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                                let icon = event.get("image").or_else(|| event.get("icon")).and_then(|i| i.as_str()).map(|s| s.to_string());
-                                let slug = event.get("slug").and_then(|s| s.as_str()).map(|s| s.to_string());
-                                let market_url = slug.as_ref().map(|s| format!("https://polymarket.com{}", s)).or_else(|| Some(format!("https://polymarket.com{}", urlencoding::encode(&title))));
-                                let end_date = event.get("endDate").or_else(|| event.get("end_date")).and_then(|v| v.as_str()).and_then(parse_datetime);
-                                let event_volume = event.get("volume").and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.replace(',', "").replace('$', "").parse::<f64>().ok()))).unwrap_or(0.0);
+                                let title = event
+                                    .get("title")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("Unknown")
+                                    .to_string();
+                                let ext_id = event
+                                    .get("id")
+                                    .and_then(|i| i.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let icon = event
+                                    .get("image")
+                                    .or_else(|| event.get("icon"))
+                                    .and_then(|i| i.as_str())
+                                    .map(|s| s.to_string());
 
-                                let markets = event.get("markets").and_then(|m| m.as_array()).cloned().unwrap_or_default();
-                                let active_markets: Vec<&Value> = markets.iter().filter(|m| {
-                                    let active = m.get("active").and_then(|a| a.as_bool()).unwrap_or(true);
-                                    let closed = m.get("closed").and_then(|c| c.as_bool()).unwrap_or(false);
-                                    active && !closed
-                                }).collect();
+                                // Extract slug for direct Polymarket URL
+                                let slug = event
+                                    .get("slug")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s.to_string());
+
+                                // Build direct Polymarket contract URL
+                                let market_url = slug
+                                    .as_ref()
+                                    .map(|s| format!("https://polymarket.com/event/{}", s))
+                                    .or_else(|| Some(format!(
+                                        "https://polymarket.com/markets?query={}",
+                                        urlencoding::encode(&title)
+                                    )));
+
+                                let end_date: Option<DateTime<Utc>> = event
+                                    .get("endDate")
+                                    .or_else(|| event.get("end_date"))
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| parse_datetime(s));
+
+                                let event_volume: f64 = event
+                                    .get("volume")
+                                    .and_then(|v| {
+                                        v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                                    })
+                                    .unwrap_or(0.0);
+
+                                let markets = event
+                                    .get("markets")
+                                    .and_then(|m| m.as_array())
+                                    .cloned()
+                                    .unwrap_or_default();
+
+                                let active_markets: Vec<&Value> = markets
+                                    .iter()
+                                    .filter(|m| {
+                                        let active = m.get("active").and_then(|a| a.as_bool()).unwrap_or(true);
+                                        let closed = m.get("closed").and_then(|c| c.as_bool()).unwrap_or(false);
+                                        active && !closed
+                                    })
+                                    .collect();
 
                                 if active_markets.is_empty() { continue; }
 
-                                let total_vol = if event_volume > 0.0 { event_volume } else { active_markets.iter().map(|m| extract_poly_market_volume(m)).sum() };
-                                let best_market = active_markets.iter().max_by(|a, b| extract_poly_market_volume(a).partial_cmp(&extract_poly_market_volume(b)).unwrap()).unwrap();
+                                let total_vol = if event_volume > 0.0 {
+                                    event_volume
+                                } else {
+                                    active_markets.iter().map(|m| extract_poly_market_volume(m)).sum()
+                                };
 
-                                let odds = best_market.get("outcomePrices").and_then(|op| op.as_str()).and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()).and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok())).unwrap_or(0.5);
+                                let best_market = active_markets
+                                    .iter()
+                                    .max_by(|a, b| {
+                                        let va = extract_poly_market_volume(a);
+                                        let vb = extract_poly_market_volume(b);
+                                        va.partial_cmp(&vb).unwrap()
+                                    })
+                                    .unwrap();
 
-                                let mut outcomes: Vec<MarketOutcome> = active_markets.iter().take(5).filter_map(|m| {
-                                    let name = m.get("question").or_else(|| m.get("groupItemTitle")).and_then(|t| t.as_str()).unwrap_or("Yes").to_string();
-                                    let price = m.get("outcomePrices").and_then(|op| op.as_str()).and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()).and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok())).unwrap_or(0.5);
-                                    Some(MarketOutcome { name, price, volume: extract_poly_market_volume(m) })
-                                }).collect();
+                                let odds = best_market
+                                    .get("outcomePrices")
+                                    .and_then(|op| op.as_str())
+                                    .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                                    .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
+                                    .unwrap_or(0.5);
+
+                                let mut outcomes: Vec<MarketOutcome> = active_markets
+                                    .iter()
+                                    .take(5)
+                                    .filter_map(|m| {
+                                        let name = m
+                                            .get("question")
+                                            .or_else(|| m.get("groupItemTitle"))
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("Yes")
+                                            .to_string();
+                                        let price = m
+                                            .get("outcomePrices")
+                                            .and_then(|op| op.as_str())
+                                            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                                            .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
+                                            .unwrap_or(0.5);
+                                        let volume = extract_poly_market_volume(m);
+                                        Some(MarketOutcome { name, price, volume })
+                                    })
+                                    .collect();
 
                                 if outcomes.is_empty() {
-                                    outcomes.push(MarketOutcome { name: "Yes".to_string(), price: odds, volume: total_vol });
+                                    outcomes.push(MarketOutcome {
+                                        name: "Yes".to_string(),
+                                        price: odds,
+                                        volume: total_vol,
+                                    });
                                 }
 
-                                let category = categorize_by_title(&title).map(|s| s.to_string()).unwrap_or_else(|| {
-                                    let tags = event.get("tags").and_then(|t| t.as_array()).cloned().unwrap_or_default();
-                                    let tag_str: String = tags.iter().filter_map(|t| t.get("label").or_else(|| t.get("name")).and_then(|v| v.as_str()).map(|s| s.to_lowercase())).collect::<Vec<String>>().join(" ");
-                                    if tag_str.contains("politic") || tag_str.contains("election") { "Politics".to_string() }
-                                    else if tag_str.contains("crypto") || tag_str.contains("bitcoin") { "Crypto".to_string() }
-                                    else if tag_str.contains("sport") { "Sports".to_string() }
-                                    else if tag_str.contains("tech") || tag_str.contains("ai") { "Tech".to_string() }
-                                    else if tag_str.contains("econ") || tag_str.contains("financ") { "Economics".to_string() }
-                                    else if tag_str.contains("climate") || tag_str.contains("weather") { "Weather".to_string() }
-                                    else { "Social".to_string() }
+                                let category = categorize_by_title(&title)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| {
+                                        let tags = event
+                                            .get("tags")
+                                            .and_then(|t| t.as_array())
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        let tag_str: Vec<String> = tags
+                                            .iter()
+                                            .filter_map(|t| {
+                                                t.get("label")
+                                                    .or_else(|| t.get("name"))
+                                                    .and_then(|v| v.as_str())
+                                                    .map(|s| s.to_lowercase())
+                                            })
+                                            .collect();
+                                        let all_tags = tag_str.join(" ");
+                                        if all_tags.contains("politic") || all_tags.contains("election") {
+                                            "Politics".to_string()
+                                        } else if all_tags.contains("crypto") || all_tags.contains("bitcoin") {
+                                            "Crypto".to_string()
+                                        } else if all_tags.contains("sport") {
+                                            "Sports".to_string()
+                                        } else if all_tags.contains("tech") || all_tags.contains("ai") {
+                                            "Tech".to_string()
+                                        } else if all_tags.contains("econ") || all_tags.contains("financ") {
+                                            "Economics".to_string()
+                                        } else if all_tags.contains("climate") || all_tags.contains("weather") {
+                                            "Weather".to_string()
+                                        } else {
+                                            "Social".to_string()
+                                        }
+                                    });
+
+                                unified.push(PredictionEvent {
+                                    id: Uuid::new_v4(),
+                                    title,
+                                    platform: "Polymarket".to_string(),
+                                    odds,
+                                    category,
+                                    external_id: ext_id,
+                                    updated_at: Utc::now(),
+                                    volume_24h: total_vol,
+                                    icon_url: icon,
+                                    outcomes,
+                                    status: "active".to_string(),
+                                    end_date,
+                                    market_url,
                                 });
 
-                                unified.push(PredictionEvent { id: Uuid::new_v4(), title, platform: "Polymarket".to_string(), odds, category, external_id: ext_id, updated_at: Utc::now(), volume_24h: total_vol, icon_url: icon, outcomes, status: "active".to_string(), end_date, market_url });
                                 poly_total += 1;
                             }
+
                             if events.len() < poly_limit as usize { break; }
+
                             poly_offset += poly_limit;
+                            println!("📡 Polymarket page fetched: {} events so far...", poly_total);
                         }
-                        Err(e) => { println!("❌ Polymarket JSON parse error: {}", e); break; }
+                        Err(e) => {
+                            println!("❌ Polymarket JSON parse error: {}", e);
+                            break;
+                        }
                     }
                 }
-                Err(e) => { println!("❌ Polymarket connection failed: {}", e); break; }
+                Err(e) => {
+                    println!("❌ Polymarket connection failed: {}", e);
+                    break;
+                }
             }
         }
+
         println!("✅ Total unified events: {}", unified.len());
         unified
     }
