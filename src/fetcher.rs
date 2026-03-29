@@ -214,45 +214,6 @@ impl MarketFetcher {
         result
     }
 
-    async fn fetch_kalshi_markets(
-        client: &reqwest::Client,
-        event_ticker: &str,
-    ) -> (f64, Vec<Value>) {
-        let url = format!(
-            "https://api.elections.kalshi.com/trade-api/v2/markets?event_ticker={}&limit=50",
-            event_ticker
-        );
-        match client.get(&url).send().await {
-            Ok(resp) => {
-                if !resp.status().is_success() { return (0.0, vec![]); }
-                match resp.json::<Value>().await {
-                    Ok(json) => {
-                        let markets = json
-                            .get("markets")
-                            .and_then(|m| m.as_array())
-                            .cloned()
-                            .unwrap_or_default();
-
-                        let active: Vec<Value> = markets
-                            .into_iter()
-                            .filter(|m| {
-                                m.get("status")
-                                    .and_then(|s| s.as_str())
-                                    .map(|s| s == "active" || s == "open")
-                                    .unwrap_or(true)
-                            })
-                            .collect();
-
-                        let total_vol: f64 = active.iter().map(|m| extract_market_volume(m)).sum();
-                        (total_vol, active)
-                    }
-                    Err(_) => (0.0, vec![]),
-                }
-            }
-            Err(_) => (0.0, vec![]),
-        }
-    }
-
     /// Two-client fetch: kalshi_client has clean headers, poly_client has Polymarket stealth headers.
     pub async fn fetch_all(
         &self,
@@ -261,7 +222,7 @@ impl MarketFetcher {
     ) -> Vec<PredictionEvent> {
         let mut unified: Vec<PredictionEvent> = Vec::new();
 
-        // ─── KALSHI (using kalshi_client) ─────────────────────────
+        // ─── KALSHI (using kalshi_client, nested markets — NO per-event API calls) ───
         let mut kalshi_cursor: Option<String> = None;
         let kalshi_limit = 200;
         let mut kalshi_retries = 0;
@@ -280,7 +241,6 @@ impl MarketFetcher {
                 Ok(resp) => {
                     let status = resp.status();
 
-                    // Rate-limit / server error: back off & retry
                     if status == 429 || status.is_server_error() {
                         kalshi_retries += 1;
                         if kalshi_retries > max_kalshi_retries {
@@ -293,7 +253,6 @@ impl MarketFetcher {
                         continue;
                     }
 
-                    // Read body as text first to guard against EOF
                     let body = match resp.text().await {
                         Ok(b) => b,
                         Err(e) => {
@@ -314,7 +273,6 @@ impl MarketFetcher {
                         continue;
                     }
 
-                    // Parse JSON from the body string
                     let json: Value = match serde_json::from_str(&body) {
                         Ok(v) => v,
                         Err(e) => {
@@ -327,7 +285,6 @@ impl MarketFetcher {
                         }
                     };
 
-                    // Reset retries on success
                     kalshi_retries = 0;
 
                     let events = json
@@ -360,8 +317,24 @@ impl MarketFetcher {
                         );
                         let icon = self.get_kalshi_image(kalshi_client, &ticker, &event_image).await;
 
-                        let (total_volume, active_markets) =
-                            Self::fetch_kalshi_markets(kalshi_client, &ticker).await;
+                        // ── Parse nested markets instead of separate API call ──
+                        let nested_markets = event
+                            .get("markets")
+                            .and_then(|m| m.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+
+                        let active_markets: Vec<Value> = nested_markets
+                            .into_iter()
+                            .filter(|m| {
+                                m.get("status")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s == "active" || s == "open")
+                                    .unwrap_or(true)
+                            })
+                            .collect();
+
+                        let total_volume: f64 = active_markets.iter().map(|m| extract_market_volume(m)).sum();
 
                         if active_markets.is_empty() { continue; }
 
