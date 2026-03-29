@@ -132,7 +132,6 @@ fn extract_market_volume(market: &Value) -> f64 {
     }
 
     if raw_vol > 0.0 {
-        // Kalshi prices are in cents (1-99), so estimate dollar volume
         let price = extract_kalshi_price(market);
         return raw_vol * price;
     }
@@ -164,47 +163,14 @@ impl MarketFetcher {
         }
     }
 
+    /// Fetch image for a Kalshi event. Tries:
+    /// 1. Event metadata endpoint (the icon shown next to the title)
+    /// 2. Series endpoint (shared series-level image)
     async fn fetch_kalshi_series_image(
         client: &reqwest::Client,
         event_ticker: &str,
     ) -> Option<String> {
-        let series_ticker = event_ticker
-            .split('-')
-            .next()
-            .unwrap_or(event_ticker)
-            .to_lowercase();
-
-        // Try series API first
-        let url = format!(
-            "https://api.elections.kalshi.com/trade-api/v2/series/{}",
-            series_ticker
-        );
-        match client.get(&url).send().await {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        if let Some(img) = json.get("series")
-                            .and_then(|s| s.get("image_url"))
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                        {
-                            return Some(img.to_string());
-                        }
-                        // Try category image from series
-                        if let Some(img) = json.get("series")
-                            .and_then(|s| s.get("category_image_url"))
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                        {
-                            return Some(img.to_string());
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        // Fallback: try event-level API for image
+        // ── 1. Event metadata endpoint (best source — the icon next to the title) ──
         let event_url = format!(
             "https://api.elections.kalshi.com/trade-api/v2/events/{}",
             event_ticker
@@ -213,12 +179,66 @@ impl MarketFetcher {
             Ok(resp) => {
                 if resp.status().is_success() {
                     if let Ok(json) = resp.json::<Value>().await {
-                        if let Some(img) = json.get("event")
-                            .and_then(|e| e.get("image_url"))
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                        {
-                            return Some(img.to_string());
+                        let event_obj = json.get("event").unwrap_or(&json);
+
+                        // Try all known image fields on the event object
+                        let img_keys = [
+                            "image_url",
+                            "featured_image_url",
+                            "thumbnail_url",
+                            "category_image_url",
+                            "og_image_url",
+                        ];
+                        for key in &img_keys {
+                            if let Some(url) = event_obj.get(key)
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty() && s.starts_with("http"))
+                            {
+                                return Some(url.to_string());
+                            }
+                        }
+
+                        // Try first nested market's image
+                        if let Some(markets) = event_obj.get("markets").and_then(|m| m.as_array()) {
+                            for m in markets {
+                                if let Some(url) = m.get("image_url")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty() && s.starts_with("http"))
+                                {
+                                    return Some(url.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+
+        // ── 2. Series endpoint fallback ──
+        let series_ticker = event_ticker
+            .split('-')
+            .next()
+            .unwrap_or(event_ticker)
+            .to_lowercase();
+
+        let series_url = format!(
+            "https://api.elections.kalshi.com/trade-api/v2/series/{}",
+            series_ticker
+        );
+        match client.get(&series_url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        let series_obj = json.get("series").unwrap_or(&json);
+                        let img_keys = ["image_url", "category_image_url"];
+                        for key in &img_keys {
+                            if let Some(url) = series_obj.get(key)
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty() && s.starts_with("http"))
+                            {
+                                return Some(url.to_string());
+                            }
                         }
                     }
                 }
@@ -254,7 +274,6 @@ impl MarketFetcher {
         result
     }
 
-    /// Two-client fetch: kalshi_client has clean headers, poly_client has Polymarket stealth headers.
     pub async fn fetch_all(
         &self,
         kalshi_client: &reqwest::Client,
@@ -262,7 +281,7 @@ impl MarketFetcher {
     ) -> Vec<PredictionEvent> {
         let mut unified: Vec<PredictionEvent> = Vec::new();
 
-        // ─── KALSHI (using kalshi_client, nested markets — NO per-event API calls) ───
+        // ─── KALSHI ───
         let mut kalshi_cursor: Option<String> = None;
         let kalshi_limit = 200;
         let mut kalshi_retries = 0;
@@ -357,7 +376,6 @@ impl MarketFetcher {
                         );
                         let icon = self.get_kalshi_image(kalshi_client, &ticker, &event_image).await;
 
-                        // ── Parse nested markets instead of separate API call ──
                         let nested_markets = event
                             .get("markets")
                             .and_then(|m| m.as_array())
@@ -483,7 +501,7 @@ impl MarketFetcher {
         let kalshi_count = unified.len();
         println!("✅ Kalshi events collected: {}", kalshi_count);
 
-        // ─── POLYMARKET (using poly_client) ───────────────────────
+        // ─── POLYMARKET ───
         let poly_limit = 100;
         let mut poly_offset = 0;
         let poly_max = 2000;
