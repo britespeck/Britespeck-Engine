@@ -72,52 +72,92 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("⚠️ 0 events found. Check API paths or Proxy status.");
         } else {
             let total_events = events.len();
-            println!("💎 Syncing {} active events in bulk chunks...", total_events);
+            println!("💎 Syncing {} active events in chunks of 100...", total_events);
 
-            for chunk in events.chunks(400) {
-                let mut query_builder: sqlx::QueryBuilder<Postgres> = sqlx::QueryBuilder::new(
-                    "INSERT INTO prediction_events (
-                        id, title, platform, odds, category, external_id,
-                        volume_24h, icon_url, updated_at, status, end_date, outcomes, market_url
-                    ) "
+            // ═══════════════════════════════════════════════════════════
+            //  RAW SQL UPSERT — no prepared statements, no sqlx_s_* errors
+            // ═══════════════════════════════════════════════════════════
+            for (chunk_idx, chunk) in events.chunks(100).enumerate() {
+                let mut values_parts: Vec<String> = Vec::with_capacity(chunk.len());
+
+                for event in chunk {
+                    let esc = |s: &str| s.replace('\'', "''");
+
+                    let title = esc(&event.title);
+                    let platform = esc(&event.platform);
+                    let category = esc(&event.category);
+                    let external_id = esc(&event.external_id);
+                    let status = esc(&event.status);
+
+                    let icon_url = match &event.icon_url {
+                        Some(u) => format!("'{}'", esc(u)),
+                        None => "NULL".to_string(),
+                    };
+                    let market_url = match &event.market_url {
+                        Some(u) => format!("'{}'", esc(u)),
+                        None => "NULL".to_string(),
+                    };
+                    let end_date = match &event.end_date {
+                        Some(d) => format!("'{}'", d.format("%Y-%m-%dT%H:%M:%S%.fZ")),
+                        None => "NULL".to_string(),
+                    };
+                    let outcomes_json = serde_json::to_string(&event.outcomes)
+                        .unwrap_or_else(|_| "[]".to_string());
+                    let outcomes_sql = format!("'{}'::jsonb", esc(&outcomes_json));
+
+                    let updated_at = event.updated_at.format("%Y-%m-%dT%H:%M:%S%.fZ");
+
+                    values_parts.push(format!(
+                        "('{}', '{}', '{}', {}, '{}', '{}', {}, {}, '{}', '{}', {}, {}, {})",
+                        event.id,
+                        title,
+                        platform,
+                        event.odds,
+                        category,
+                        external_id,
+                        event.volume_24h,
+                        icon_url,
+                        updated_at,
+                        status,
+                        end_date,
+                        outcomes_sql,
+                        market_url,
+                    ));
+                }
+
+                let sql = format!(
+                    "INSERT INTO prediction_events \
+                     (id, title, platform, odds, category, external_id, \
+                      volume_24h, icon_url, updated_at, status, end_date, outcomes, market_url) \
+                     VALUES {} \
+                     ON CONFLICT (external_id) DO UPDATE SET \
+                       odds = EXCLUDED.odds, \
+                       category = EXCLUDED.category, \
+                       volume_24h = EXCLUDED.volume_24h, \
+                       icon_url = EXCLUDED.icon_url, \
+                       updated_at = EXCLUDED.updated_at, \
+                       status = EXCLUDED.status, \
+                       end_date = EXCLUDED.end_date, \
+                       outcomes = EXCLUDED.outcomes, \
+                       market_url = EXCLUDED.market_url",
+                    values_parts.join(", ")
                 );
 
-                query_builder.push_values(chunk, |mut b, event| {
-                    let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or_default();
-                    b.push_bind(event.id)
-                        .push_bind(&event.title)
-                        .push_bind(&event.platform)
-                        .push_bind(event.odds)
-                        .push_bind(&event.category)
-                        .push_bind(&event.external_id)
-                        .push_bind(event.volume_24h)
-                        .push_bind(&event.icon_url)
-                        .push_bind(event.updated_at)
-                        .push_bind(&event.status)
-                        .push_bind(event.end_date)
-                        .push_bind(outcomes_json)
-                        .push_bind(&event.market_url);
-                });
-
-                query_builder.push(
-                    " ON CONFLICT (external_id) DO UPDATE
-                     SET odds = EXCLUDED.odds,
-                         category = EXCLUDED.category,
-                         volume_24h = EXCLUDED.volume_24h,
-                         icon_url = EXCLUDED.icon_url,
-                         updated_at = EXCLUDED.updated_at,
-                         status = EXCLUDED.status,
-                         end_date = EXCLUDED.end_date,
-                         outcomes = EXCLUDED.outcomes,
-                         market_url = EXCLUDED.market_url"
-                );
-
-                let res = query_builder.build().persistent(false).execute(&pool).await;
-
-                if let Err(e) = res {
-                    println!("❌ Bulk SQL Error on chunk: {}", e);
+                match sqlx::query(&sql)
+                    .persistent(false)
+                    .execute(&pool)
+                    .await
+                {
+                    Ok(r) => {
+                        if chunk_idx % 10 == 0 {
+                            println!("  ✅ Chunk {} done ({} rows)", chunk_idx + 1, r.rows_affected());
+                        }
+                    }
+                    Err(e) => println!("  ❌ Chunk {} error: {}", chunk_idx + 1, e),
                 }
             }
+
+            println!("✅ Sync complete");
 
             // --- BPS-100 CALCULATION ---
             let top_100 = sqlx::query_as::<Postgres, (f64,)>(
