@@ -1,7 +1,7 @@
 mod models;
 mod fetcher;
 
-use sqlx::postgres::{PgPoolOptions, Postgres, PgConnectOptions};
+use sqlx::postgres::PgConnectOptions;
 use std::time::Duration;
 use crate::fetcher::MarketFetcher;
 use std::env;
@@ -15,173 +15,201 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
 
     let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://localhost/placeholder".to_string());
+        .unwrap_or_else(|_| "postgres://localhost/britespeck".to_string());
 
-    println!("🚀 Connecting to Supabase (Forced Simple Protocol)...");
-
-    let options = PgConnectOptions::from_str(&database_url)?
+    // ZERO statement cache to prevent sqlx_s_ errors with PgBouncer
+    let connect_options = PgConnectOptions::from_str(&database_url)?
         .statement_cache_capacity(0);
 
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
         .acquire_timeout(Duration::from_secs(10))
-        .connect_with(options)
+        .connect_with(connect_options)
         .await?;
 
-    // --- KALSHI CLIENT (clean headers) ---
-    let mut kalshi_builder = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-        .timeout(Duration::from_secs(25));
+    println!("✅ Connected to database");
 
-    if let Ok(proxy_url) = env::var("PROXY_URL") {
-        println!("🌐 Using Proxy for Kalshi: {}", proxy_url);
-        let proxy = reqwest::Proxy::all(&proxy_url)?;
-        kalshi_builder = kalshi_builder.proxy(proxy);
+    // ── Kalshi client (clean headers) ──
+    let mut kalshi_headers = HeaderMap::new();
+    if let Ok(token) = env::var("KALSHI_API_TOKEN") {
+        kalshi_headers.insert(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {}", token))
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
     }
+    kalshi_headers.insert("Accept", HeaderValue::from_static("application/json"));
+    kalshi_headers.insert(
+        "User-Agent",
+        HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
+    );
 
-    let kalshi_client = kalshi_builder.build()?;
+    let kalshi_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .default_headers(kalshi_headers)
+        .build()?;
 
-    // --- POLYMARKET CLIENT (stealth headers) ---
+    // ── Polymarket client (stealth headers) ──
     let mut poly_headers = HeaderMap::new();
-    poly_headers.insert("Accept", HeaderValue::from_static("application/json, text/plain, */*"));
-    poly_headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
+    poly_headers.insert("Accept", HeaderValue::from_static("application/json"));
+    poly_headers.insert(
+        "User-Agent",
+        HeaderValue::from_static("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"),
+    );
     poly_headers.insert("Origin", HeaderValue::from_static("https://polymarket.com"));
-    poly_headers.insert("Referer", HeaderValue::from_static("https://polymarket.com"));
+    poly_headers.insert("Referer", HeaderValue::from_static("https://polymarket.com/"));
 
-    let mut poly_builder = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+    let poly_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
         .default_headers(poly_headers)
-        .cookie_store(true)
-        .timeout(Duration::from_secs(25));
-
-    if let Ok(proxy_url) = env::var("PROXY_URL") {
-        let proxy = reqwest::Proxy::all(proxy_url)?;
-        poly_builder = poly_builder.proxy(proxy);
-    }
-
-    let poly_client = poly_builder.build()?;
+        .build()?;
 
     let fetcher = MarketFetcher::new();
-    println!("📈 BPS-100 & Multi-Tab Engine Live!");
+
+    println!("🚀 Britespeck sync engine started");
 
     loop {
-        println!("Checking markets...");
-        let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
+        println!("\n🔄 Starting sync cycle...");
 
-        if events.is_empty() {
-            println!("⚠️ 0 events found. Check API paths or Proxy status.");
-        } else {
-            let total_events = events.len();
-            println!("💎 Syncing {} active events in chunks of 100...", total_events);
+        match fetcher.fetch_all(&kalshi_client, &poly_client).await {
+            Ok(events) => {
+                println!("📦 Fetched {} total events", events.len());
 
-            // ═══════════════════════════════════════════════════════════
-            //  RAW SQL UPSERT — no prepared statements, no sqlx_s_* errors
-            // ═══════════════════════════════════════════════════════════
-            for (chunk_idx, chunk) in events.chunks(100).enumerate() {
-                let mut values_parts: Vec<String> = Vec::with_capacity(chunk.len());
+                if events.is_empty() {
+                    println!("⚠️ No events fetched, skipping upsert");
+                } else {
+                    let mut success_count: u64 = 0;
+                    let mut error_count: usize = 0;
 
-                for event in chunk {
-                    let esc = |s: &str| s.replace('\'', "''");
+                    // ── Upsert in chunks of 100 using RAW SQL (no prepared statements) ──
+                    for chunk in events.chunks(100) {
+                        let mut values_parts: Vec<String> = Vec::new();
 
-                    let title = esc(&event.title);
-                    let platform = esc(&event.platform);
-                    let category = esc(&event.category);
-                    let external_id = esc(&event.external_id);
-                    let status = esc(&event.status);
+                        for e in chunk {
+                            let id = e.id.to_string();
+                            let title = e.title.replace('\'', "''");
+                            let platform = e.platform.replace('\'', "''");
+                            let odds = e.odds;
+                            let category = format!("'{}'", e.category.replace('\'', "''"));
+                            let external_id = e.external_id.replace('\'', "''");
+                            let volume_24h = e.volume_24h;
+                            let icon_url = match &e.icon_url {
+                                Some(u) => format!("'{}'", u.replace('\'', "''")),
+                                None => "NULL".to_string(),
+                            };
+                            let status = format!("'{}'", e.status.replace('\'', "''"));
+                            let end_date = match &e.end_date {
+                                Some(d) => format!("'{}'", d.to_rfc3339()),
+                                None => "NULL".to_string(),
+                            };
+                            let market_url = match &e.market_url {
+                                Some(u) => format!("'{}'", u.replace('\'', "''")),
+                                None => "NULL".to_string(),
+                            };
 
-                    let icon_url = match &event.icon_url {
-                        Some(u) => format!("'{}'", esc(u)),
-                        None => "NULL".to_string(),
-                    };
-                    let market_url = match &event.market_url {
-                        Some(u) => format!("'{}'", esc(u)),
-                        None => "NULL".to_string(),
-                    };
-                    let end_date = match &event.end_date {
-                        Some(d) => format!("'{}'", d.format("%Y-%m-%dT%H:%M:%S%.fZ")),
-                        None => "NULL".to_string(),
-                    };
-                    let outcomes_json = serde_json::to_string(&event.outcomes)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    let outcomes_sql = format!("'{}'::jsonb", esc(&outcomes_json));
+                            // Serialize outcomes to JSONB
+                            let outcomes_json = {
+                                let json_str = serde_json::to_string(&e.outcomes)
+                                    .unwrap_or_else(|_| "[]".to_string())
+                                    .replace('\'', "''");
+                                format!("'{}'::jsonb", json_str)
+                            };
 
-                    let updated_at = event.updated_at.format("%Y-%m-%dT%H:%M:%S%.fZ");
+                            values_parts.push(format!(
+                                "('{}', '{}', '{}', {}, {}, '{}', {}, {}, {}, {}, {}, {})",
+                                id, title, platform, odds, category, external_id,
+                                volume_24h, icon_url, status, end_date,
+                                market_url, outcomes_json
+                            ));
+                        }
 
-                    values_parts.push(format!(
-                        "('{}', '{}', '{}', {}, '{}', '{}', {}, {}, '{}', '{}', {}, {}, {})",
-                        event.id,
-                        title,
-                        platform,
-                        event.odds,
-                        category,
-                        external_id,
-                        event.volume_24h,
-                        icon_url,
-                        updated_at,
-                        status,
-                        end_date,
-                        outcomes_sql,
-                        market_url,
-                    ));
-                }
+                        let raw_sql = format!(
+                            "INSERT INTO prediction_events \
+                             (id, title, platform, odds, category, external_id, \
+                              volume_24h, icon_url, status, end_date, \
+                              market_url, outcomes) \
+                             VALUES {} \
+                             ON CONFLICT (external_id) DO UPDATE SET \
+                               title = EXCLUDED.title, \
+                               platform = EXCLUDED.platform, \
+                               odds = EXCLUDED.odds, \
+                               category = EXCLUDED.category, \
+                               volume_24h = EXCLUDED.volume_24h, \
+                               icon_url = EXCLUDED.icon_url, \
+                               status = EXCLUDED.status, \
+                               end_date = EXCLUDED.end_date, \
+                               market_url = EXCLUDED.market_url, \
+                               outcomes = EXCLUDED.outcomes, \
+                               updated_at = now()",
+                            values_parts.join(", ")
+                        );
 
-                let sql = format!(
-                    "INSERT INTO prediction_events \
-                     (id, title, platform, odds, category, external_id, \
-                      volume_24h, icon_url, updated_at, status, end_date, outcomes, market_url) \
-                     VALUES {} \
-                     ON CONFLICT (external_id) DO UPDATE SET \
-                       odds = EXCLUDED.odds, \
-                       category = EXCLUDED.category, \
-                       volume_24h = EXCLUDED.volume_24h, \
-                       icon_url = EXCLUDED.icon_url, \
-                       updated_at = EXCLUDED.updated_at, \
-                       status = EXCLUDED.status, \
-                       end_date = EXCLUDED.end_date, \
-                       outcomes = EXCLUDED.outcomes, \
-                       market_url = EXCLUDED.market_url",
-                    values_parts.join(", ")
-                );
-
-                match sqlx::query(&sql)
-                    .persistent(false)
-                    .execute(&pool)
-                    .await
-                {
-                    Ok(r) => {
-                        if chunk_idx % 10 == 0 {
-                            println!("  ✅ Chunk {} done ({} rows)", chunk_idx + 1, r.rows_affected());
+                        match sqlx::query(&raw_sql)
+                            .persistent(false)
+                            .execute(&pool)
+                            .await
+                        {
+                            Ok(result) => {
+                                success_count += result.rows_affected();
+                            }
+                            Err(e) => {
+                                error_count += chunk.len();
+                                eprintln!("❌ Chunk insert error: {}", e);
+                                eprintln!("   SQL preview: {}...", &raw_sql[..raw_sql.len().min(500)]);
+                            }
                         }
                     }
-                    Err(e) => println!("  ❌ Chunk {} error: {}", chunk_idx + 1, e),
+
+                    println!("✅ Upserted {} rows, {} errors", success_count, error_count);
+                }
+
+                // ── BPS-100 Index Calculation ──
+                println!("📊 Calculating BPS-100 index...");
+                let bps_query = "SELECT odds, platform FROM prediction_events \
+                                 WHERE status = 'active' \
+                                 ORDER BY volume_24h DESC NULLS LAST \
+                                 LIMIT 100";
+
+                match sqlx::query_as::<_, (f64, String)>(bps_query)
+                    .persistent(false)
+                    .fetch_all(&pool)
+                    .await
+                {
+                    Ok(rows) if !rows.is_empty() => {
+                        let total = rows.len() as f64;
+                        let sum: f64 = rows.iter().map(|(odds, _)| odds).sum();
+                        let index_value = sum / total;
+
+                        let poly_count = rows.iter()
+                            .filter(|(_, p)| p.to_lowercase() == "polymarket")
+                            .count() as i32;
+                        let kalshi_count = rows.iter()
+                            .filter(|(_, p)| p.to_lowercase() == "kalshi")
+                            .count() as i32;
+                        let total_contracts = rows.len() as i32;
+
+                        let bps_sql = format!(
+                            "INSERT INTO index_history (value, market_count, timestamp) \
+                             VALUES ({}, {}, now())",
+                            index_value, total_contracts
+                        );
+
+                        match sqlx::query(&bps_sql)
+                            .persistent(false)
+                            .execute(&pool)
+                            .await
+                        {
+                            Ok(_) => println!("📊 BPS-100 INDEX: {:.4} ({} contracts, {}K/{}P)",
+                                index_value, total_contracts, kalshi_count, poly_count),
+                            Err(e) => eprintln!("❌ BPS-100 insert error: {}", e),
+                        }
+                    }
+                    Ok(_) => println!("⚠️ No active contracts for BPS-100"),
+                    Err(e) => eprintln!("❌ BPS-100 query error: {}", e),
                 }
             }
-
-            println!("✅ Sync complete");
-
-            // --- BPS-100 CALCULATION ---
-            let top_100 = sqlx::query_as::<Postgres, (f64,)>(
-                "SELECT odds FROM prediction_events WHERE status = 'active' ORDER BY volume_24h DESC LIMIT 100"
-            )
-            .persistent(false)
-            .fetch_all(&pool).await;
-
-            match top_100 {
-                Ok(rows) if !rows.is_empty() => {
-                    let sum: f64 = rows.iter().map(|row| row.0).sum();
-                    let index_value = sum / rows.len() as f64;
-
-                    let _ = sqlx::query("INSERT INTO index_history (value, market_count) VALUES ($1, $2)")
-                        .persistent(false)
-                        .bind(index_value)
-                        .bind(rows.len() as i32)
-                        .execute(&pool)
-                        .await;
-
-                    println!("📊 BPS-100 INDEX UPDATED: {:.4}", index_value);
-                },
-                Err(e) => println!("❌ BPS-100 Query Error: {}", e),
-                _ => {}
+            Err(e) => {
+                eprintln!("❌ Fetch error: {}", e);
             }
         }
 
