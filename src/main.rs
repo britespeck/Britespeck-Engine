@@ -28,32 +28,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect_with(options)
         .await?;
 
-    // --- STEALTH CLIENT SETUP ---
-    let mut headers = HeaderMap::new();
-    headers.insert("Accept", HeaderValue::from_static("application/json, text/plain, */*"));
-    headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
-    headers.insert("Origin", HeaderValue::from_static("https://polymarket.com"));
-    headers.insert("Referer", HeaderValue::from_static("https://polymarket.com"));
-
-    let mut client_builder = reqwest::Client::builder()
+    // --- KALSHI CLIENT (clean headers) ---
+    let mut kalshi_builder = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-        .default_headers(headers)
+        .timeout(Duration::from_secs(25));
+
+    if let Ok(proxy_url) = env::var("PROXY_URL") {
+        println!("🌐 Using Proxy for Kalshi: {}", proxy_url);
+        let proxy = reqwest::Proxy::all(&proxy_url)?;
+        kalshi_builder = kalshi_builder.proxy(proxy);
+    }
+
+    let kalshi_client = kalshi_builder.build()?;
+
+    // --- POLYMARKET CLIENT (stealth headers) ---
+    let mut poly_headers = HeaderMap::new();
+    poly_headers.insert("Accept", HeaderValue::from_static("application/json, text/plain, */*"));
+    poly_headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
+    poly_headers.insert("Origin", HeaderValue::from_static("https://polymarket.com"));
+    poly_headers.insert("Referer", HeaderValue::from_static("https://polymarket.com"));
+
+    let mut poly_builder = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        .default_headers(poly_headers)
         .cookie_store(true)
         .timeout(Duration::from_secs(25));
 
     if let Ok(proxy_url) = env::var("PROXY_URL") {
-        println!("🌐 Using Proxy: {}", proxy_url);
         let proxy = reqwest::Proxy::all(proxy_url)?;
-        client_builder = client_builder.proxy(proxy);
+        poly_builder = poly_builder.proxy(proxy);
     }
 
-    let client = client_builder.build()?;
+    let poly_client = poly_builder.build()?;
+
     let fetcher = MarketFetcher::new();
     println!("📈 BPS-100 & Multi-Tab Engine Live!");
 
     loop {
         println!("Checking markets...");
-        let events = fetcher.fetch_all(&client).await;
+        let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
 
         if events.is_empty() {
             println!("⚠️ 0 events found. Check API paths or Proxy status.");
@@ -72,18 +85,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 query_builder.push_values(chunk, |mut b, event| {
                     let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or_default();
                     b.push_bind(event.id)
-                     .push_bind(&event.title)
-                     .push_bind(&event.platform)
-                     .push_bind(event.odds)
-                     .push_bind(&event.category)
-                     .push_bind(&event.external_id)
-                     .push_bind(event.volume_24h)
-                     .push_bind(&event.icon_url)
-                     .push_bind(event.updated_at)
-                     .push_bind(&event.status)
-                     .push_bind(event.end_date)
-                     .push_bind(outcomes_json)
-                     .push_bind(&event.market_url);
+                        .push_bind(&event.title)
+                        .push_bind(&event.platform)
+                        .push_bind(event.odds)
+                        .push_bind(&event.category)
+                        .push_bind(&event.external_id)
+                        .push_bind(event.volume_24h)
+                        .push_bind(&event.icon_url)
+                        .push_bind(event.updated_at)
+                        .push_bind(&event.status)
+                        .push_bind(event.end_date)
+                        .push_bind(outcomes_json)
+                        .push_bind(&event.market_url);
                 });
 
                 query_builder.push(

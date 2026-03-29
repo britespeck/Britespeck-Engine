@@ -253,10 +253,15 @@ impl MarketFetcher {
         }
     }
 
-    pub async fn fetch_all(&self, client: &reqwest::Client) -> Vec<PredictionEvent> {
+    /// Two-client fetch: kalshi_client has clean headers, poly_client has Polymarket stealth headers.
+    pub async fn fetch_all(
+        &self,
+        kalshi_client: &reqwest::Client,
+        poly_client: &reqwest::Client,
+    ) -> Vec<PredictionEvent> {
         let mut unified: Vec<PredictionEvent> = Vec::new();
 
-        // ─── KALSHI (with EOF / rate-limit guard) ─────────────────
+        // ─── KALSHI (using kalshi_client) ─────────────────────────
         let mut kalshi_cursor: Option<String> = None;
         let kalshi_limit = 200;
         let mut kalshi_retries = 0;
@@ -271,11 +276,11 @@ impl MarketFetcher {
                 url.push_str(&format!("&cursor={}", cursor));
             }
 
-            match client.get(&url).send().await {
+            match kalshi_client.get(&url).send().await {
                 Ok(resp) => {
                     let status = resp.status();
 
-                    // ── Rate-limit / server error: back off & retry ──
+                    // Rate-limit / server error: back off & retry
                     if status == 429 || status.is_server_error() {
                         kalshi_retries += 1;
                         if kalshi_retries > max_kalshi_retries {
@@ -288,7 +293,7 @@ impl MarketFetcher {
                         continue;
                     }
 
-                    // ── Read body as text first to guard against EOF ──
+                    // Read body as text first to guard against EOF
                     let body = match resp.text().await {
                         Ok(b) => b,
                         Err(e) => {
@@ -309,7 +314,7 @@ impl MarketFetcher {
                         continue;
                     }
 
-                    // ── Parse JSON from the body string ──
+                    // Parse JSON from the body string
                     let json: Value = match serde_json::from_str(&body) {
                         Ok(v) => v,
                         Err(e) => {
@@ -353,10 +358,10 @@ impl MarketFetcher {
                             event,
                             &["image_url", "thumbnail_url", "series_image_url"],
                         );
-                        let icon = self.get_kalshi_image(&client, &ticker, &event_image).await;
+                        let icon = self.get_kalshi_image(kalshi_client, &ticker, &event_image).await;
 
                         let (total_volume, active_markets) =
-                            Self::fetch_kalshi_markets(&client, &ticker).await;
+                            Self::fetch_kalshi_markets(kalshi_client, &ticker).await;
 
                         if active_markets.is_empty() { continue; }
 
@@ -465,7 +470,7 @@ impl MarketFetcher {
         let kalshi_count = unified.len();
         println!("✅ Kalshi events collected: {}", kalshi_count);
 
-        // ─── POLYMARKET ───────────────────────────────────────────
+        // ─── POLYMARKET (using poly_client) ───────────────────────
         let poly_limit = 100;
         let mut poly_offset = 0;
         let poly_max = 2000;
@@ -479,7 +484,7 @@ impl MarketFetcher {
                 poly_limit, poly_offset
             );
 
-            match client.get(&url).send().await {
+            match poly_client.get(&url).send().await {
                 Ok(resp) => {
                     match resp.json::<Value>().await {
                         Ok(json) => {
