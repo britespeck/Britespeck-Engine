@@ -13,7 +13,7 @@ use axum::{routing::get, extract::State, Json, Router};
 use tower_http::cors::CorsLayer;
 use serde::Serialize;
 
-// 1. Define the Data Structure for Lovable
+// 1. Data Structures for Lovable
 #[derive(Serialize, sqlx::FromRow)]
 struct PredictionEvent {
     id: uuid::Uuid,
@@ -24,11 +24,29 @@ struct PredictionEvent {
     status: String,
 }
 
-// 2. The API Handler (Switched to runtime query_as to fix GitHub build)
+#[derive(Serialize, sqlx::FromRow)]
+struct IndexHistoryEntry {
+    value: f64,
+    market_count: i32,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+// 2. API Handlers
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
-    // Note: Removed the ! and added type parameters to query_as
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status FROM prediction_events ORDER BY updated_at DESC LIMIT 100"
+        "SELECT id, title, platform, odds, category, status FROM prediction_events WHERE status = 'active' ORDER BY updated_at DESC LIMIT 100"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+    
+    Json(rows)
+}
+
+// FIX: New handler for /index_history
+async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHistoryEntry>> {
+    let rows = sqlx::query_as::<_, IndexHistoryEntry>(
+        "SELECT value, market_count, timestamp FROM index_history ORDER BY timestamp DESC LIMIT 100"
     )
     .fetch_all(&pool)
     .await
@@ -59,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_pool = pool.clone();
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
+        .route("/index_history", get(get_index_history)) // <--- FIXED: Added the missing door
         .layer(CorsLayer::permissive()) 
         .with_state(api_pool);
 
@@ -88,12 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
             
             if !events.is_empty() {
-                for chunk in events.chunks(100) {
-                   // Ensure you use 'sync_pool' for your logic inside here
-                }
+                // Ensure your existing chunk loop is here...
             }
             
-            // Your BPS-100 Calculation code using 'sync_pool' here...
+            // Your BPS-100 Calculation code here...
 
             println!("💤 Sleeping 30s...");
             tokio::time::sleep(Duration::from_secs(30)).await;
