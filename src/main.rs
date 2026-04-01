@@ -24,13 +24,16 @@ struct PredictionEvent {
     status: String,
 }
 
-// 2. The API Handler (Corrected State syntax)
+// 2. The API Handler (Switched to runtime query_as to fix GitHub build)
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
-    let rows = sqlx::query_as!(PredictionEvent, 
-        "SELECT id, title, platform, odds, category, status FROM prediction_events ORDER BY updated_at DESC LIMIT 100")
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
+    // Note: Removed the ! and added type parameters to query_as
+    let rows = sqlx::query_as::<_, PredictionEvent>(
+        "SELECT id, title, platform, odds, category, status FROM prediction_events ORDER BY updated_at DESC LIMIT 100"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+    
     Json(rows)
 }
 
@@ -45,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .statement_cache_capacity(0);
 
     let pool = PgPoolOptions::new()
-        .max_connections(10) // Enough for both Scraper and API
+        .max_connections(10) 
         .acquire_timeout(Duration::from_secs(10))
         .connect_with(connect_options)
         .await?;
@@ -56,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_pool = pool.clone();
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
-        .layer(CorsLayer::permissive()) // Required for Lovable connection
+        .layer(CorsLayer::permissive()) 
         .with_state(api_pool);
 
     // --- SYNC ENGINE (The Worker in the background) ---
@@ -85,14 +88,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
             
             if !events.is_empty() {
-                // Ensure the logic inside here uses &sync_pool
                 for chunk in events.chunks(100) {
-                   // Your SQL insertion logic goes here...
-                   // Use: sqlx::query(...).execute(&sync_pool).await;
+                   // Ensure you use 'sync_pool' for your logic inside here
                 }
             }
             
-            // Your BPS-100 Calculation code using &sync_pool here...
+            // Your BPS-100 Calculation code using 'sync_pool' here...
 
             println!("💤 Sleeping 30s...");
             tokio::time::sleep(Duration::from_secs(30)).await;
