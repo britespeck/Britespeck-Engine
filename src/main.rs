@@ -8,7 +8,7 @@ use std::env;
 use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
-// New imports for the API
+// Corrected imports for the API
 use axum::{routing::get, extract::State, Json, Router};
 use tower_http::cors::CorsLayer;
 use serde::Serialize;
@@ -24,8 +24,8 @@ struct PredictionEvent {
     status: String,
 }
 
-// 2. The "Waiter" function (API Handler)
-async fn get_predictions(State(pool): State(sqlx::PgPool)) -> Json<Vec<PredictionEvent>> {
+// 2. The API Handler (Corrected State syntax)
+async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
     let rows = sqlx::query_as!(PredictionEvent, 
         "SELECT id, title, platform, odds, category, status FROM prediction_events ORDER BY updated_at DESC LIMIT 100")
         .fetch_all(&pool)
@@ -45,24 +45,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .statement_cache_capacity(0);
 
     let pool = PgPoolOptions::new()
-        .max_connections(5) // Increased slightly to handle both API and Sync
+        .max_connections(10) // Enough for both Scraper and API
         .acquire_timeout(Duration::from_secs(10))
         .connect_with(connect_options)
         .await?;
 
     println!("✅ Connected to database");
 
-    // --- NEW: API SERVER SETUP (For Lovable) ---
+    // --- API SERVER SETUP (The Waiter for Lovable) ---
     let api_pool = pool.clone();
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
-        .layer(CorsLayer::permissive()) // Required for Lovable browser access
+        .layer(CorsLayer::permissive()) // Required for Lovable connection
         .with_state(api_pool);
 
-    // --- SYNC ENGINE (Moved to background task) ---
+    // --- SYNC ENGINE (The Worker in the background) ---
     let sync_pool = pool.clone();
     tokio::spawn(async move {
-        // Move your client setups inside here to keep the main thread clean
         let mut kalshi_headers = HeaderMap::new();
         if let Ok(token) = env::var("KALSHI_API_TOKEN") {
             kalshi_headers.insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
@@ -86,14 +85,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
             
             if !events.is_empty() {
-                // ... Your existing chunking and SQL logic stays exactly here ...
-                // Note: Use 'sync_pool' here instead of 'pool'
+                // Ensure the logic inside here uses &sync_pool
                 for chunk in events.chunks(100) {
-                    // [Your existing INSERT/UPSERT loop code]
+                   // Your SQL insertion logic goes here...
+                   // Use: sqlx::query(...).execute(&sync_pool).await;
                 }
             }
             
-            // [Your existing BPS-100 Calculation code]
+            // Your BPS-100 Calculation code using &sync_pool here...
 
             println!("💤 Sleeping 30s...");
             tokio::time::sleep(Duration::from_secs(30)).await;
