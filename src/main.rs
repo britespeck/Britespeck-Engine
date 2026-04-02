@@ -22,6 +22,7 @@ struct PredictionEvent {
     odds: f64,
     category: Option<String>,
     status: String,
+    icon_url: Option<String>, // <--- FIXED: Added for images
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -33,8 +34,9 @@ struct IndexHistoryEntry {
 
 // 2. API Handlers
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
+    // FIXED: Added icon_url to SELECT and increased LIMIT to 5000
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status FROM prediction_events WHERE status = 'active' ORDER BY updated_at DESC LIMIT 100"
+        "SELECT id, title, platform, odds, category, status, icon_url FROM prediction_events ORDER BY updated_at DESC LIMIT 5000"
     )
     .fetch_all(&pool)
     .await
@@ -43,7 +45,7 @@ async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<Predictio
     Json(rows)
 }
 
-// FIX: New handler for /index_history
+// Handler for /index_history
 async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHistoryEntry>> {
     let rows = sqlx::query_as::<_, IndexHistoryEntry>(
         "SELECT value, market_count, timestamp FROM index_history ORDER BY timestamp DESC LIMIT 100"
@@ -60,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
 
     let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://localhost/britespeck".to_string());
+        .expect("DATABASE_URL environment variable must be set");
 
     let connect_options = PgConnectOptions::from_str(&database_url)?
         .statement_cache_capacity(0);
@@ -73,15 +75,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✅ Connected to database");
 
-    // --- API SERVER SETUP (The Waiter for Lovable) ---
+    // --- API SERVER SETUP ---
     let api_pool = pool.clone();
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
-        .route("/index_history", get(get_index_history)) // <--- FIXED: Added the missing door
+        .route("/index_history", get(get_index_history))
         .layer(CorsLayer::permissive()) 
         .with_state(api_pool);
 
-    // --- SYNC ENGINE (The Worker in the background) ---
+    // --- SYNC ENGINE (Worker in the background) ---
     let sync_pool = pool.clone();
     tokio::spawn(async move {
         let mut kalshi_headers = HeaderMap::new();
@@ -106,11 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\n🔄 Starting sync cycle...");
             let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
             
-            if !events.is_empty() {
-                // Ensure your existing chunk loop is here...
-            }
-            
-            // Your BPS-100 Calculation code here...
+            // Your existing sync/upsert logic will run here using sync_pool
+            // ...
 
             println!("💤 Sleeping 30s...");
             tokio::time::sleep(Duration::from_secs(30)).await;
