@@ -1,5 +1,6 @@
 mod models;
 mod fetcher;
+mod strategy; // <--- 1. REGISTER THE NEW MODULE
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -8,9 +9,9 @@ use std::env;
 use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
-use axum::{routing::get, extract::State, Json, Router};
+use axum::{routing::get, extract::{State, Query}, Json, Router}; // Added Query for Backtesting
 use tower_http::cors::CorsLayer;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 
 // 1. Data Structures for Lovable
 #[derive(Serialize, sqlx::FromRow)]
@@ -28,6 +29,9 @@ struct PredictionEvent {
     outcomes: Option<serde_json::Value>,
     market_url: Option<String>,
     end_date: Option<chrono::DateTime<chrono::Utc>>,
+    // --- 2. ADDED OMG COLUMNS ---
+    rsi_signal: Option<f64>,
+    sentiment_score: Option<f64>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -37,10 +41,16 @@ struct IndexHistoryEntry {
     timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Deserialize)]
+struct BacktestParams {
+    rsi: f64,
+    days: i32,
+}
+
 // 2. API Handlers
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date FROM prediction_events ORDER BY updated_at DESC LIMIT 50000"
+        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM prediction_events ORDER BY updated_at DESC LIMIT 50000"
     )
     .fetch_all(&pool)
     .await
@@ -48,7 +58,19 @@ async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<Predictio
     Json(rows)
 }
 
-// Handler for /index_history
+// --- 3. ADDED BACKTEST HANDLER ---
+async fn get_backtest(
+    State(pool): State<sqlx::PgPool>,
+    Query(params): Query<BacktestParams>
+) -> Json<strategy::BacktestResult> {
+    let res = strategy::run_backtest(&pool, params.rsi, params.days).await.unwrap_or_else(|_| strategy::BacktestResult {
+        total_trades: 0,
+        estimated_profit: 0.0,
+        win_rate: 0.0,
+    });
+    Json(res)
+}
+
 async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHistoryEntry>> {
     let rows = sqlx::query_as::<_, IndexHistoryEntry>(
         "SELECT value, market_count, timestamp FROM index_history ORDER BY timestamp DESC LIMIT 100"
@@ -82,6 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
         .route("/index_history", get(get_index_history))
+        .route("/backtest", get(get_backtest)) // <--- 4. ADDED BACKTEST ROUTE
         .layer(CorsLayer::permissive())
         .with_state(api_pool);
 
@@ -108,7 +131,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         loop {
             println!("\n🔄 Starting sync cycle...");
-            let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
+            let _events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
+
+            // --- 5. RUN THE OMG STRATEGY BRAIN ---
+            if let Err(e) = strategy::run_omg_strategy(&sync_pool).await {
+                println!("⚠️ OMG Strategy Warning: {}", e);
+            }
 
             println!("💤 Sleeping 30s...");
             tokio::time::sleep(Duration::from_secs(30)).await;
