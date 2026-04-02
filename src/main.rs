@@ -34,9 +34,9 @@ struct IndexHistoryEntry {
 
 // 2. API Handlers
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
-    // FIXED: Added icon_url to SELECT and increased LIMIT to 5000
+    // FIXED: Added icon_url to SELECT and increased LIMIT to 50000
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status, icon_url FROM prediction_events ORDER BY updated_at DESC LIMIT 5000"
+        "SELECT id, title, platform, odds, category, status, icon_url FROM prediction_events ORDER BY updated_at DESC LIMIT 50000"
     )
     .fetch_all(&pool)
     .await
