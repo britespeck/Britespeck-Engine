@@ -8,7 +8,6 @@ use std::env;
 use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
-// Corrected imports for the API
 use axum::{routing::get, extract::State, Json, Router};
 use tower_http::cors::CorsLayer;
 use serde::Serialize;
@@ -22,7 +21,13 @@ struct PredictionEvent {
     odds: f64,
     category: Option<String>,
     status: String,
-    icon_url: Option<String>, // <--- FIXED: Added for images
+    icon_url: Option<String>,
+    external_id: String,
+    volume_24h: Option<f64>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    outcomes: Option<serde_json::Value>,
+    market_url: Option<String>,
+    end_date: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -34,14 +39,12 @@ struct IndexHistoryEntry {
 
 // 2. API Handlers
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
-    // FIXED: Added icon_url to SELECT and increased LIMIT to 50000
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status, icon_url FROM prediction_events ORDER BY updated_at DESC LIMIT 50000"
+        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date FROM prediction_events ORDER BY updated_at DESC LIMIT 50000"
     )
     .fetch_all(&pool)
     .await
     .unwrap_or_default();
-    
     Json(rows)
 }
 
@@ -53,7 +56,6 @@ async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHi
     .fetch_all(&pool)
     .await
     .unwrap_or_default();
-    
     Json(rows)
 }
 
@@ -68,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .statement_cache_capacity(0);
 
     let pool = PgPoolOptions::new()
-        .max_connections(10) 
+        .max_connections(10)
         .acquire_timeout(Duration::from_secs(10))
         .connect_with(connect_options)
         .await?;
@@ -80,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
         .route("/index_history", get(get_index_history))
-        .layer(CorsLayer::permissive()) 
+        .layer(CorsLayer::permissive())
         .with_state(api_pool);
 
     // --- SYNC ENGINE (Worker in the background) ---
@@ -107,9 +109,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             println!("\n🔄 Starting sync cycle...");
             let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
-            
-            // Your existing sync/upsert logic will run here using sync_pool
-            // ...
 
             println!("💤 Sleeping 30s...");
             tokio::time::sleep(Duration::from_secs(30)).await;
