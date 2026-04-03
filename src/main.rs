@@ -1,6 +1,6 @@
 mod models;
 mod fetcher;
-mod strategy; // <--- 1. REGISTER THE NEW MODULE
+mod strategy;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -9,11 +9,10 @@ use std::env;
 use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
-use axum::{routing::get, extract::{State, Query}, Json, Router}; // Added Query for Backtesting
+use axum::{routing::get, extract::{State, Query}, Json, Router};
 use tower_http::cors::CorsLayer;
 use serde::{Serialize, Deserialize};
 
-// 1. Data Structures for Lovable
 #[derive(Serialize, sqlx::FromRow)]
 struct PredictionEvent {
     id: uuid::Uuid,
@@ -29,7 +28,6 @@ struct PredictionEvent {
     outcomes: Option<serde_json::Value>,
     market_url: Option<String>,
     end_date: Option<chrono::DateTime<chrono::Utc>>,
-    // --- 2. ADDED OMG COLUMNS ---
     rsi_signal: Option<f64>,
     sentiment_score: Option<f64>,
 }
@@ -47,10 +45,10 @@ struct BacktestParams {
     days: i32,
 }
 
-// 2. API Handlers
+// 1. API Handlers - Limit set back to 50,000
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM prediction_events ORDER BY updated_at DESC LIMIT 50000"
+        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM public.prediction_events ORDER BY updated_at DESC LIMIT 50000"
     )
     .fetch_all(&pool)
     .await
@@ -58,7 +56,6 @@ async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<Predictio
     Json(rows)
 }
 
-// --- 3. ADDED BACKTEST HANDLER ---
 async fn get_backtest(
     State(pool): State<sqlx::PgPool>,
     Query(params): Query<BacktestParams>
@@ -73,7 +70,7 @@ async fn get_backtest(
 
 async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHistoryEntry>> {
     let rows = sqlx::query_as::<_, IndexHistoryEntry>(
-        "SELECT value, market_count, timestamp FROM index_history ORDER BY timestamp DESC LIMIT 100"
+        "SELECT value, market_count, timestamp FROM public.index_history ORDER BY timestamp DESC LIMIT 100"
     )
     .fetch_all(&pool)
     .await
@@ -104,36 +101,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
         .route("/index_history", get(get_index_history))
-        .route("/backtest", get(get_backtest)) // <--- 4. ADDED BACKTEST ROUTE
+        .route("/backtest", get(get_backtest))
         .layer(CorsLayer::permissive())
         .with_state(api_pool);
 
-    // --- SYNC ENGINE (Worker in the background) ---
+    // --- SYNC ENGINE ---
     let sync_pool = pool.clone();
     tokio::spawn(async move {
+        let fetcher = MarketFetcher::new();
+        
         let mut kalshi_headers = HeaderMap::new();
         if let Ok(token) = env::var("KALSHI_API_TOKEN") {
             kalshi_headers.insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
         }
         kalshi_headers.insert("Accept", HeaderValue::from_static("application/json"));
         kalshi_headers.insert("User-Agent", HeaderValue::from_static("Mozilla/5.0"));
-
         let kalshi_client = reqwest::Client::builder().default_headers(kalshi_headers).build().unwrap();
 
         let mut poly_headers = HeaderMap::new();
         poly_headers.insert("Accept", HeaderValue::from_static("application/json"));
         poly_headers.insert("User-Agent", HeaderValue::from_static("Mozilla/5.0"));
-
         let poly_client = reqwest::Client::builder().default_headers(poly_headers).build().unwrap();
 
-        let fetcher = MarketFetcher::new();
-        println!("🚀 Britespeck sync engine started in background");
+        println!("🚀 Britespeck sync engine started");
 
         loop {
             println!("\n🔄 Starting sync cycle...");
-            let _events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
+            let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
+            
+            // --- SAVE TO DATABASE (UPSERT) ---
+            for event in &events {
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO public.prediction_events 
+                    (id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                    ON CONFLICT (id) DO UPDATE SET
+                        odds = EXCLUDED.odds,
+                        volume_24h = EXCLUDED.volume_24h,
+                        updated_at = EXCLUDED.updated_at,
+                        outcomes = EXCLUDED.outcomes
+                    "#
+                )
+                .bind(event.id)
+                .bind(&event.title)
+                .bind(&event.platform)
+                .bind(event.odds)
+                .bind(&event.category)
+                .bind(&event.status)
+                .bind(&event.icon_url)
+                .bind(&event.external_id)
+                .bind(event.volume_24h)
+                .bind(event.updated_at)
+                .bind(&event.outcomes)
+                .bind(&event.market_url)
+                .bind(event.end_date)
+                .execute(&sync_pool)
+                .await;
+            }
+            println!("💾 Persisted {} events to RDS for Lovable", events.len());
 
-            // --- 5. RUN THE OMG STRATEGY BRAIN ---
+            // --- RUN OMG STRATEGY BRAIN ---
             if let Err(e) = strategy::run_omg_strategy(&sync_pool).await {
                 println!("⚠️ OMG Strategy Warning: {}", e);
             }
@@ -143,7 +171,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Run the API server in the foreground
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     println!("📡 Britespeck API listening on port 8080");
     axum::serve(listener, app).await?;
