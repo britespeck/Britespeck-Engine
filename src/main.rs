@@ -45,14 +45,17 @@ struct BacktestParams {
     days: i32,
 }
 
-// 1. API Handlers - Limit set back to 50,000
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM public.prediction_events ORDER BY updated_at DESC LIMIT 50000"
+        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM public.prediction_events ORDER BY volume_24h DESC NULLS LAST LIMIT 50000"
     )
     .fetch_all(&pool)
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|e| {
+        println!("❌ GET /prediction_events query failed: {}", e);
+        vec![]
+    });
+    println!("📤 GET /prediction_events returning {} rows", rows.len());
     Json(rows)
 }
 
@@ -60,10 +63,13 @@ async fn get_backtest(
     State(pool): State<sqlx::PgPool>,
     Query(params): Query<BacktestParams>
 ) -> Json<strategy::BacktestResult> {
-    let res = strategy::run_backtest(&pool, params.rsi, params.days).await.unwrap_or_else(|_| strategy::BacktestResult {
-        total_trades: 0,
-        estimated_profit: 0.0,
-        win_rate: 0.0,
+    let res = strategy::run_backtest(&pool, params.rsi, params.days).await.unwrap_or_else(|e| {
+        println!("❌ Backtest error: {}", e);
+        strategy::BacktestResult {
+            total_trades: 0,
+            estimated_profit: 0.0,
+            win_rate: 0.0,
+        }
     });
     Json(res)
 }
@@ -74,7 +80,10 @@ async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHi
     )
     .fetch_all(&pool)
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|e| {
+        println!("❌ GET /index_history query failed: {}", e);
+        vec![]
+    });
     Json(rows)
 }
 
@@ -109,7 +118,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sync_pool = pool.clone();
     tokio::spawn(async move {
         let fetcher = MarketFetcher::new();
-        
         let mut kalshi_headers = HeaderMap::new();
         if let Ok(token) = env::var("KALSHI_API_TOKEN") {
             kalshi_headers.insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
@@ -128,22 +136,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             println!("\n🔄 Starting sync cycle...");
             let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
-            
-            // --- SAVE TO DATABASE (UPSERT) ---
+
+            let mut success_count = 0u64;
+            let mut fail_count = 0u64;
+
             for event in &events {
-                // FIXED: Convert the outcomes vector to a JSON value so SQLx can save it to JSONB
                 let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or(serde_json::Value::Null);
 
-                let _ = sqlx::query(
+                match sqlx::query(
                     r#"
                     INSERT INTO public.prediction_events 
                     (id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                    ON CONFLICT (id) DO UPDATE SET
+                    ON CONFLICT (external_id) DO UPDATE SET
                         odds = EXCLUDED.odds,
                         volume_24h = EXCLUDED.volume_24h,
                         updated_at = EXCLUDED.updated_at,
-                        outcomes = EXCLUDED.outcomes
+                        outcomes = EXCLUDED.outcomes,
+                        icon_url = COALESCE(EXCLUDED.icon_url, public.prediction_events.icon_url),
+                        status = EXCLUDED.status,
+                        market_url = COALESCE(EXCLUDED.market_url, public.prediction_events.market_url),
+                        category = COALESCE(EXCLUDED.category, public.prediction_events.category)
                     "#
                 )
                 .bind(event.id)
@@ -156,13 +169,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bind(&event.external_id)
                 .bind(event.volume_24h)
                 .bind(event.updated_at)
-                .bind(outcomes_json) // Use the converted JSON value here
+                .bind(outcomes_json)
                 .bind(&event.market_url)
                 .bind(event.end_date)
                 .execute(&sync_pool)
-                .await;
+                .await
+                {
+                    Ok(_) => success_count += 1,
+                    Err(e) => {
+                        if fail_count < 3 {
+                            println!("❌ Upsert failed [{}]: {}", event.external_id, e);
+                        }
+                        fail_count += 1;
+                    }
+                }
             }
-            println!("💾 Persisted {} events to RDS for Lovable", events.len());
+
+            println!("💾 Persisted {}/{} events ({} failed)", success_count, events.len(), fail_count);
 
             // --- RUN OMG STRATEGY BRAIN ---
             if let Err(e) = strategy::run_omg_strategy(&sync_pool).await {
