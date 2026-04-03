@@ -131,6 +131,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             // --- SAVE TO DATABASE (UPSERT) ---
             for event in &events {
+                // FIXED: Convert the outcomes vector to a JSON value so SQLx can save it to JSONB
+                let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or(serde_json::Value::Null);
+
                 let _ = sqlx::query(
                     r#"
                     INSERT INTO public.prediction_events 
@@ -153,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bind(&event.external_id)
                 .bind(event.volume_24h)
                 .bind(event.updated_at)
-                .bind(&event.outcomes)
+                .bind(outcomes_json) // Use the converted JSON value here
                 .bind(&event.market_url)
                 .bind(event.end_date)
                 .execute(&sync_pool)
