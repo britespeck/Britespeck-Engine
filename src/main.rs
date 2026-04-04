@@ -1,7 +1,7 @@
 mod models;
 mod fetcher;
 mod strategy;
-mod user_bots; // 🆕
+mod user_bots;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -10,10 +10,10 @@ use std::env;
 use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
-use axum::{routing::{get, post, patch}, extract::{State, Query}, Json, Router}; // 🆕 added post, patch
+use axum::{routing::{get, post, patch}, extract::{State, Query}, Json, Router};
 use tower_http::cors::CorsLayer;
 use serde::{Serialize, Deserialize};
-use user_bots::{get_user_bot, create_user_bot, update_user_bot}; // 🆕
+use user_bots::{get_user_bot, create_user_bot, update_user_bot};
 
 #[derive(Serialize, sqlx::FromRow)]
 struct PredictionEvent {
@@ -99,27 +99,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connect_options = PgConnectOptions::from_str(&database_url)?
         .statement_cache_capacity(0);
 
-    let pool = PgPoolOptions::new()
+    // API pool — serves HTTP requests (fast, dedicated)
+    let api_pool = PgPoolOptions::new()
         .max_connections(10)
-        .acquire_timeout(Duration::from_secs(10))
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(connect_options.clone())
+        .await?;
+
+    // Sync pool — bulk upserts in background loop (separate)
+    let sync_pool = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(Duration::from_secs(15))
         .connect_with(connect_options)
         .await?;
 
-    println!("✅ Connected to database");
+    println!("✅ Connected to database (dual pool: 10 API + 10 sync)");
 
     // --- API SERVER SETUP ---
-    let api_pool = pool.clone();
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
         .route("/index_history", get(get_index_history))
         .route("/backtest", get(get_backtest))
-        .route("/user_bots", get(get_user_bot).post(create_user_bot)) // 🆕
-        .route("/user_bots/:id", patch(update_user_bot)) // 🆕
+        .route("/user_bots", get(get_user_bot).post(create_user_bot))
+        .route("/user_bots/:id", patch(update_user_bot))
         .layer(CorsLayer::permissive())
         .with_state(api_pool);
 
     // --- SYNC ENGINE ---
-    let sync_pool = pool.clone();
     tokio::spawn(async move {
         let fetcher = MarketFetcher::new();
         let mut kalshi_headers = HeaderMap::new();
