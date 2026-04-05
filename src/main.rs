@@ -12,7 +12,7 @@ use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
 use axum::{routing::{get, post, patch}, extract::{State, Query, Path}, Json, Router};
 use axum::response::IntoResponse;
-use http::StatusCode;
+use axum::http::StatusCode;
 use tower_http::cors::CorsLayer;
 use serde::{Serialize, Deserialize};
 use user_bots::{get_user_bot, create_user_bot, update_user_bot};
@@ -64,74 +64,16 @@ struct PatchIconBody {
     icon_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct BacktestQuery {
+    rsi_threshold: Option<f64>,
+    days: Option<i32>,
+}
+
 async fn get_predictions(
     State(pool): State<sqlx::PgPool>,
     Query(params): Query<PredictionQuery>,
 ) -> Json<Vec<PredictionRow>> {
-    let mut query = String::from(
-        "SELECT id::text, title, platform, odds, category, external_id, \
-         updated_at::text, volume_24h, icon_url, outcomes, \
-         NULL::text as slug, market_url, status, end_date::text, \
-         rsi_signal, sentiment_score, is_live \
-         FROM public.prediction_events WHERE 1=1"
-    );
-    let mut bind_idx = 0u32;
-    let mut binds_str: Vec<String> = Vec::new();
-    let mut binds_f64: Vec<(u32, f64)> = Vec::new();
-    let mut binds_bool: Vec<(u32, bool)> = Vec::new();
-
-    if let Some(ref platform) = params.platform {
-        bind_idx += 1;
-        query.push_str(&format!(" AND platform = ${}", bind_idx));
-        binds_str.push(platform.clone());
-    }
-
-    if let Some(ref category) = params.category {
-        let cats: Vec<&str> = category.split(',').collect();
-        if cats.len() == 1 {
-            bind_idx += 1;
-            query.push_str(&format!(" AND category = ${}", bind_idx));
-            binds_str.push(cats[0].to_string());
-        } else {
-            let placeholders: Vec<String> = cats.iter().map(|c| {
-                bind_idx += 1;
-                binds_str.push(c.to_string());
-                format!("${}", bind_idx)
-            }).collect();
-            query.push_str(&format!(" AND category IN ({})", placeholders.join(",")));
-        }
-    }
-
-    if let Some(ref title_like) = params.title_like {
-        bind_idx += 1;
-        query.push_str(&format!(" AND title ILIKE ${}", bind_idx));
-        binds_str.push(format!("%{}%", title_like));
-    }
-
-    if let Some(odds_gt) = params.odds_gt {
-        bind_idx += 1;
-        query.push_str(&format!(" AND odds > ${}", bind_idx));
-        binds_f64.push((bind_idx, odds_gt));
-    }
-
-    if let Some(odds_lt) = params.odds_lt {
-        bind_idx += 1;
-        query.push_str(&format!(" AND odds < ${}", bind_idx));
-        binds_f64.push((bind_idx, odds_lt));
-    }
-
-    if let Some(ref updated_at_gte) = params.updated_at_gte {
-        bind_idx += 1;
-        query.push_str(&format!(" AND updated_at >= ${}::timestamptz", bind_idx));
-        binds_str.push(updated_at_gte.clone());
-    }
-
-    if let Some(is_live) = params.is_live {
-        bind_idx += 1;
-        query.push_str(&format!(" AND is_live = ${}", bind_idx));
-        binds_bool.push((bind_idx, is_live));
-    }
-
     let order_col = match params.order_by.as_deref() {
         Some("volume_24h") => "volume_24h",
         Some("odds") => "odds",
@@ -140,17 +82,8 @@ async fn get_predictions(
         _ => "volume_24h",
     };
     let order_dir = if params.order_asc.unwrap_or(false) { "ASC" } else { "DESC" };
-    query.push_str(&format!(" ORDER BY {} {} NULLS LAST", order_col, order_dir));
-
     let limit = params.limit.unwrap_or(100).min(5000);
-    query.push_str(&format!(" LIMIT {}", limit));
 
-    // Build the query using sqlx's raw query with dynamic binds.
-    // Since sqlx doesn't support truly dynamic bind types easily,
-    // we'll use query_as with raw SQL and bind all as strings,
-    // casting in SQL where needed.
-    // 
-    // Simpler approach: rebuild with all-string binds and SQL casts
     let mut rebuilt = String::from(
         "SELECT id::text, title, platform, odds, category, external_id, \
          updated_at::text, volume_24h, icon_url, outcomes, \
@@ -225,9 +158,11 @@ async fn get_predictions(
 
 async fn get_backtest(
     State(pool): State<sqlx::PgPool>,
-    Query(params): Query<strategy::BacktestParams>,
+    Query(params): Query<BacktestQuery>,
 ) -> Json<strategy::BacktestResult> {
-    let res = strategy::run_backtest(&pool, &params).await.unwrap_or_else(|e| {
+    let rsi = params.rsi_threshold.unwrap_or(30.0);
+    let days = params.days.unwrap_or(7);
+    let res = strategy::run_backtest(&pool, rsi, days).await.unwrap_or_else(|e| {
         println!("❌ Backtest error: {}", e);
         strategy::BacktestResult {
             total_trades: 0,
