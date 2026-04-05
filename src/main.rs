@@ -10,9 +10,11 @@ use std::env;
 use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
-use axum::{routing::{get, post, patch}, extract::{State, Query}, Json, Router};
+use axum::{routing::{get, post, patch}, extract::{State, Query, Path}, Json, Router};
 use tower_http::cors::CorsLayer;
 use serde::{Serialize, Deserialize};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use user_bots::{get_user_bot, create_user_bot, update_user_bot};
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -45,6 +47,11 @@ struct IndexHistoryEntry {
 struct BacktestParams {
     rsi: f64,
     days: i32,
+}
+
+#[derive(Deserialize)]
+struct PatchIconBody {
+    icon_url: String,
 }
 
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
@@ -89,6 +96,35 @@ async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHi
     Json(rows)
 }
 
+async fn patch_event_icon(
+    State(pool): State<sqlx::PgPool>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchIconBody>,
+) -> impl IntoResponse {
+    let result = sqlx::query(
+        "UPDATE prediction_events SET icon_url = $1, updated_at = NOW() WHERE id = $2::uuid"
+    )
+    .bind(&body.icon_url)
+    .bind(&id)
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(r) => {
+            if r.rows_affected() == 0 {
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Event not found"}))).into_response()
+            } else {
+                println!("✅ PATCH icon for {} → {}", id, body.icon_url);
+                (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
+            }
+        }
+        Err(e) => {
+            eprintln!("❌ PATCH icon error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
@@ -99,14 +135,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connect_options = PgConnectOptions::from_str(&database_url)?
         .statement_cache_capacity(0);
 
-    // API pool — serves HTTP requests (fast, dedicated)
     let api_pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(connect_options.clone())
         .await?;
 
-    // Sync pool — bulk upserts in background loop (separate)
     let sync_pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(15))
@@ -115,9 +149,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✅ Connected to database (dual pool: 10 API + 10 sync)");
 
-    // --- API SERVER SETUP ---
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
+        .route("/prediction_events/:id/icon", patch(patch_event_icon))
         .route("/index_history", get(get_index_history))
         .route("/backtest", get(get_backtest))
         .route("/user_bots", get(get_user_bot).post(create_user_bot))
@@ -125,7 +159,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(CorsLayer::permissive())
         .with_state(api_pool);
 
-    // --- SYNC ENGINE ---
     tokio::spawn(async move {
         let fetcher = MarketFetcher::new();
         let mut kalshi_headers = HeaderMap::new();
@@ -197,7 +230,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("💾 Persisted {}/{} events ({} failed)", success_count, events.len(), fail_count);
 
-            // --- RUN OMG STRATEGY BRAIN ---
             if let Err(e) = strategy::run_omg_strategy(&sync_pool).await {
                 println!("⚠️ OMG Strategy Warning: {}", e);
             }
