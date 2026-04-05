@@ -2,15 +2,14 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)] // Added FromRow
 pub struct MarketOutcome {
     pub name: String,
     pub price: f64,
     pub volume: f64,
-    pub image_url: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)] // Added FromRow
 pub struct PredictionEvent {
     pub id: Uuid,
     pub title: String,
@@ -23,7 +22,6 @@ pub struct PredictionEvent {
     pub updated_at: DateTime<Utc>,
     pub status: String,
     pub end_date: Option<DateTime<Utc>>,
-    pub outcomes: Vec<MarketOutcome>,
+    pub outcomes: Vec<MarketOutcome>, // This works with JSONB columns
     pub market_url: Option<String>,
-    pub is_live: bool,
 }

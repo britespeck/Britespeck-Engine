@@ -11,158 +11,68 @@ use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
 use axum::{routing::{get, post, patch}, extract::{State, Query, Path}, Json, Router};
-use axum::response::IntoResponse;
-use axum::http::StatusCode;
 use tower_http::cors::CorsLayer;
 use serde::{Serialize, Deserialize};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use user_bots::{get_user_bot, create_user_bot, update_user_bot};
 
-#[derive(Debug, Deserialize)]
-struct PredictionQuery {
-    platform: Option<String>,
-    category: Option<String>,
-    title_like: Option<String>,
-    odds_gt: Option<f64>,
-    odds_lt: Option<f64>,
-    updated_at_gte: Option<String>,
-    order_by: Option<String>,
-    order_asc: Option<bool>,
-    limit: Option<i64>,
-    is_live: Option<bool>,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-struct PredictionRow {
-    id: String,
+#[derive(Serialize, sqlx::FromRow)]
+struct PredictionEvent {
+    id: uuid::Uuid,
     title: String,
     platform: String,
     odds: f64,
     category: Option<String>,
-    external_id: String,
-    updated_at: Option<String>,
-    volume_24h: Option<f64>,
+    status: String,
     icon_url: Option<String>,
+    external_id: String,
+    volume_24h: Option<f64>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
     outcomes: Option<serde_json::Value>,
-    slug: Option<String>,
     market_url: Option<String>,
-    status: Option<String>,
-    end_date: Option<String>,
+    end_date: Option<chrono::DateTime<chrono::Utc>>,
     rsi_signal: Option<f64>,
     sentiment_score: Option<f64>,
-    is_live: Option<bool>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Serialize, sqlx::FromRow)]
 struct IndexHistoryEntry {
     value: f64,
     market_count: i32,
-    timestamp: Option<String>,
+    timestamp: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
+struct BacktestParams {
+    rsi: f64,
+    days: i32,
+}
+
+#[derive(Deserialize)]
 struct PatchIconBody {
     icon_url: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct BacktestQuery {
-    rsi_threshold: Option<f64>,
-    days: Option<i32>,
-}
-
-async fn get_predictions(
-    State(pool): State<sqlx::PgPool>,
-    Query(params): Query<PredictionQuery>,
-) -> Json<Vec<PredictionRow>> {
-    let order_col = match params.order_by.as_deref() {
-        Some("volume_24h") => "volume_24h",
-        Some("odds") => "odds",
-        Some("updated_at") => "updated_at",
-        Some("title") => "title",
-        _ => "volume_24h",
-    };
-    let order_dir = if params.order_asc.unwrap_or(false) { "ASC" } else { "DESC" };
-    let limit = params.limit.unwrap_or(100).min(5000);
-
-    let mut rebuilt = String::from(
-        "SELECT id::text, title, platform, odds, category, external_id, \
-         updated_at::text, volume_24h, icon_url, outcomes, \
-         NULL::text as slug, market_url, status, end_date::text, \
-         rsi_signal, sentiment_score, is_live \
-         FROM public.prediction_events WHERE 1=1"
-    );
-    let mut all_binds: Vec<String> = Vec::new();
-    let mut pidx = 0u32;
-
-    if let Some(ref platform) = params.platform {
-        pidx += 1;
-        rebuilt.push_str(&format!(" AND platform = ${}", pidx));
-        all_binds.push(platform.clone());
-    }
-    if let Some(ref category) = params.category {
-        let cats: Vec<&str> = category.split(',').collect();
-        if cats.len() == 1 {
-            pidx += 1;
-            rebuilt.push_str(&format!(" AND category = ${}", pidx));
-            all_binds.push(cats[0].to_string());
-        } else {
-            let placeholders: Vec<String> = cats.iter().map(|c| {
-                pidx += 1;
-                all_binds.push(c.to_string());
-                format!("${}", pidx)
-            }).collect();
-            rebuilt.push_str(&format!(" AND category IN ({})", placeholders.join(",")));
-        }
-    }
-    if let Some(ref title_like) = params.title_like {
-        pidx += 1;
-        rebuilt.push_str(&format!(" AND title ILIKE ${}", pidx));
-        all_binds.push(format!("%{}%", title_like));
-    }
-    if let Some(odds_gt) = params.odds_gt {
-        pidx += 1;
-        rebuilt.push_str(&format!(" AND odds > ${}::float8", pidx));
-        all_binds.push(odds_gt.to_string());
-    }
-    if let Some(odds_lt) = params.odds_lt {
-        pidx += 1;
-        rebuilt.push_str(&format!(" AND odds < ${}::float8", pidx));
-        all_binds.push(odds_lt.to_string());
-    }
-    if let Some(ref updated_at_gte) = params.updated_at_gte {
-        pidx += 1;
-        rebuilt.push_str(&format!(" AND updated_at >= ${}::timestamptz", pidx));
-        all_binds.push(updated_at_gte.clone());
-    }
-    if let Some(is_live) = params.is_live {
-        pidx += 1;
-        rebuilt.push_str(&format!(" AND is_live = ${}::bool", pidx));
-        all_binds.push(is_live.to_string());
-    }
-
-    rebuilt.push_str(&format!(" ORDER BY {} {} NULLS LAST", order_col, order_dir));
-    rebuilt.push_str(&format!(" LIMIT {}", limit));
-
-    let mut q = sqlx::query_as::<_, PredictionRow>(&rebuilt);
-    for b in &all_binds {
-        q = q.bind(b);
-    }
-
-    let rows = q.fetch_all(&pool).await.unwrap_or_else(|e| {
+async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
+    let rows = sqlx::query_as::<_, PredictionEvent>(
+        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM public.prediction_events ORDER BY volume_24h DESC NULLS LAST LIMIT 50000"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_else(|e| {
         println!("❌ GET /prediction_events query failed: {}", e);
         vec![]
     });
-
+    println!("📤 GET /prediction_events returning {} rows", rows.len());
     Json(rows)
 }
 
 async fn get_backtest(
     State(pool): State<sqlx::PgPool>,
-    Query(params): Query<BacktestQuery>,
+    Query(params): Query<BacktestParams>
 ) -> Json<strategy::BacktestResult> {
-    let rsi = params.rsi_threshold.unwrap_or(30.0);
-    let days = params.days.unwrap_or(7);
-    let res = strategy::run_backtest(&pool, rsi, days).await.unwrap_or_else(|e| {
+    let res = strategy::run_backtest(&pool, params.rsi, params.days).await.unwrap_or_else(|e| {
         println!("❌ Backtest error: {}", e);
         strategy::BacktestResult {
             total_trades: 0,
@@ -279,8 +189,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match sqlx::query(
                     r#"
                     INSERT INTO public.prediction_events 
-                    (id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, is_live)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    (id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (external_id) DO UPDATE SET
                         odds = EXCLUDED.odds,
                         volume_24h = EXCLUDED.volume_24h,
@@ -289,8 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         icon_url = COALESCE(EXCLUDED.icon_url, public.prediction_events.icon_url),
                         status = EXCLUDED.status,
                         market_url = COALESCE(EXCLUDED.market_url, public.prediction_events.market_url),
-                        category = COALESCE(EXCLUDED.category, public.prediction_events.category),
-                        is_live = EXCLUDED.is_live
+                        category = COALESCE(EXCLUDED.category, public.prediction_events.category)
                     "#
                 )
                 .bind(event.id)
@@ -306,7 +215,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bind(outcomes_json)
                 .bind(&event.market_url)
                 .bind(event.end_date)
-                .bind(event.is_live)
                 .execute(&sync_pool)
                 .await
                 {
@@ -320,10 +228,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let live_count = events.iter().filter(|e| e.is_live).count();
-            println!("💾 Persisted {}/{} events ({} failed, {} live)", success_count, events.len(), fail_count, live_count);
+            println!("💾 Persisted {}/{} events ({} failed)", success_count, events.len(), fail_count);
 
-            // --- RUN OMG STRATEGY BRAIN ---
             if let Err(e) = strategy::run_omg_strategy(&sync_pool).await {
                 println!("⚠️ OMG Strategy Warning: {}", e);
             }
