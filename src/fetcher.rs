@@ -111,6 +111,7 @@ fn extract_kalshi_price(market: &Value) -> f64 {
 }
 
 fn extract_market_volume(market: &Value) -> f64 {
+    // Try dollar-denominated fields first
     let dollar_candidates = ["dollar_volume", "volume_24h_fp", "volume_fp"];
     for key in &dollar_candidates {
         if let Some(v) = market.get(key) {
@@ -119,6 +120,7 @@ fn extract_market_volume(market: &Value) -> f64 {
         }
     }
 
+    // Otherwise get raw contract volume and convert to dollar estimate
     let raw_vol_candidates = ["volume_24h", "volume24h", "volume", "open_interest"];
     let mut raw_vol: f64 = 0.0;
     for key in &raw_vol_candidates {
@@ -168,7 +170,7 @@ impl MarketFetcher {
         client: &reqwest::Client,
         event_ticker: &str,
     ) -> Option<String> {
-        // ── 1. Event metadata endpoint ──
+        // ── 1. Event metadata endpoint (best source — the icon next to the title) ──
         let event_url = format!(
             "https://api.elections.kalshi.com/trade-api/v2/events/{}",
             event_ticker
@@ -179,6 +181,7 @@ impl MarketFetcher {
                     if let Ok(json) = resp.json::<Value>().await {
                         let event_obj = json.get("event").unwrap_or(&json);
 
+                        // Try all known image fields on the event object
                         let img_keys = [
                             "image_url",
                             "featured_image_url",
@@ -192,18 +195,6 @@ impl MarketFetcher {
                                 .filter(|s| !s.is_empty() && s.starts_with("http"))
                             {
                                 return Some(url.to_string());
-                            }
-                        }
-
-                        // Try market_details images (the icons next to each outcome)
-                        if let Some(details) = event_obj.get("market_details").and_then(|d| d.as_array()) {
-                            for d in details {
-                                if let Some(url) = d.get("image_url")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty() && s.starts_with("http"))
-                                {
-                                    return Some(url.to_string());
-                                }
                             }
                         }
 
@@ -379,34 +370,11 @@ impl MarketFetcher {
                             .and_then(|c| c.as_str())
                             .unwrap_or("");
 
-                        // ── Build market_details image lookup (per-outcome icons) ──
-                        let market_detail_images: HashMap<String, String> = event
-                            .get("market_details")
-                            .and_then(|md| md.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|d| {
-                                        let t = d.get("market_ticker")?.as_str()?;
-                                        let img = d.get("image_url")?.as_str()
-                                            .filter(|s| !s.is_empty() && s.starts_with("http"))?;
-                                        Some((t.to_string(), img.to_string()))
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        // ── Event-level image (includes featured_image_url) ──
                         let event_image = extract_image(
                             event,
-                            &["image_url", "featured_image_url", "thumbnail_url", "series_image_url", "category_image_url", "og_image_url"],
+                            &["image_url", "thumbnail_url", "series_image_url", "category_image_url", "og_image_url"],
                         );
-
-                        // If no event-level image, try first market_details image as fallback
-                        let event_image_with_detail_fallback = event_image.or_else(|| {
-                            market_detail_images.values().next().cloned()
-                        });
-
-                        let icon = self.get_kalshi_image(kalshi_client, &ticker, &event_image_with_detail_fallback).await;
+                        let icon = self.get_kalshi_image(kalshi_client, &ticker, &event_image).await;
 
                         let nested_markets = event
                             .get("markets")
@@ -445,9 +413,6 @@ impl MarketFetcher {
                             .iter()
                             .take(5)
                             .filter_map(|m| {
-                                let market_ticker = m.get("ticker")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("");
                                 let name = m
                                     .get("title")
                                     .or_else(|| m.get("subtitle"))
@@ -457,15 +422,7 @@ impl MarketFetcher {
                                     .to_string();
                                 let price = extract_kalshi_price(m);
                                 let volume = extract_market_volume(m);
-
-                                // Outcome image: market_details lookup → market-level image_url
-                                let outcome_image = market_detail_images.get(market_ticker).cloned()
-                                    .or_else(|| m.get("image_url")
-                                        .and_then(|v| v.as_str())
-                                        .filter(|s| !s.is_empty() && s.starts_with("http"))
-                                        .map(|s| s.to_string()));
-
-                                Some(MarketOutcome { name, price, volume, image_url: outcome_image })
+                                Some(MarketOutcome { name, price, volume })
                             })
                             .collect();
 
@@ -474,7 +431,6 @@ impl MarketFetcher {
                                 name: "Yes".to_string(),
                                 price: odds,
                                 volume: total_volume,
-                                image_url: None,
                             });
                         }
 
@@ -669,12 +625,7 @@ impl MarketFetcher {
                                             .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
                                             .unwrap_or(0.5);
                                         let volume = extract_poly_market_volume(m);
-                                        let outcome_image = m.get("image")
-                                            .and_then(|v| v.as_str())
-                                            .filter(|s| !s.is_empty())
-                                            .map(|s| s.to_string());
-
-                                        Some(MarketOutcome { name, price, volume, image_url: outcome_image })
+                                        Some(MarketOutcome { name, price, volume })
                                     })
                                     .collect();
 
@@ -683,7 +634,6 @@ impl MarketFetcher {
                                         name: "Yes".to_string(),
                                         price: odds,
                                         volume: total_vol,
-                                        image_url: None,
                                     });
                                 }
 
