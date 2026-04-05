@@ -10,7 +10,7 @@ use std::env;
 use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
-use axum::{routing::{get, post, patch}, extract::{State, Query, Path}, Json, Router};
+use axum::{routing::{get, patch}, extract::{State, Query, Path}, Json, Router};
 use tower_http::cors::CorsLayer;
 use serde::{Serialize, Deserialize};
 use axum::http::StatusCode;

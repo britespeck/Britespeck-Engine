@@ -398,10 +398,10 @@ impl MarketFetcher {
 
                         let odds = extract_kalshi_price(best_market);
 
-                        let mut outcomes: Vec<MarketOutcome> = active_markets
+                        let outcomes: Vec<MarketOutcome> = active_markets
                             .iter()
                             .take(5)
-                            .filter_map(|m| {
+                            .map(|m| {
                                 let name = m
                                     .get("title")
                                     .or_else(|| m.get("subtitle"))
@@ -411,22 +411,19 @@ impl MarketFetcher {
                                     .to_string();
                                 let price = extract_kalshi_price(m);
                                 let volume = extract_market_volume(m);
-                                let image_url = m.get("image_url")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                    .map(|s| s.to_string());
-                                Some(MarketOutcome { name, price, volume, image_url })
+                                MarketOutcome { name, price, volume }
                             })
                             .collect();
 
-                        if outcomes.is_empty() {
-                            outcomes.push(MarketOutcome {
+                        let outcomes = if outcomes.is_empty() {
+                            vec![MarketOutcome {
                                 name: "Yes".to_string(),
                                 price: odds,
                                 volume: total_volume,
-                                image_url: None,
-                            });
-                        }
+                            }]
+                        } else {
+                            outcomes
+                        };
 
                         let category = categorize_by_title(&title)
                             .map(|s| s.to_string())
@@ -467,7 +464,6 @@ impl MarketFetcher {
                             status: "active".to_string(),
                             end_date,
                             market_url,
-                            is_live: false,
                         });
                     }
 
@@ -603,10 +599,10 @@ impl MarketFetcher {
                                     .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
                                     .unwrap_or(0.5);
 
-                                let mut outcomes: Vec<MarketOutcome> = active_markets
+                                let outcomes: Vec<MarketOutcome> = active_markets
                                     .iter()
                                     .take(5)
-                                    .filter_map(|m| {
+                                    .map(|m| {
                                         let name = m
                                             .get("question")
                                             .or_else(|| m.get("groupItemTitle"))
@@ -620,22 +616,19 @@ impl MarketFetcher {
                                             .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
                                             .unwrap_or(0.5);
                                         let volume = extract_poly_market_volume(m);
-                                        let image_url = m.get("image")
-                                            .and_then(|v| v.as_str())
-                                            .filter(|s| !s.is_empty())
-                                            .map(|s| s.to_string());
-                                        Some(MarketOutcome { name, price, volume, image_url })
+                                        MarketOutcome { name, price, volume }
                                     })
                                     .collect();
 
-                                if outcomes.is_empty() {
-                                    outcomes.push(MarketOutcome {
+                                let outcomes = if outcomes.is_empty() {
+                                    vec![MarketOutcome {
                                         name: "Yes".to_string(),
                                         price: odds,
                                         volume: total_vol,
-                                        image_url: None,
-                                    });
-                                }
+                                    }]
+                                } else {
+                                    outcomes
+                                };
 
                                 let category = categorize_by_title(&title)
                                     .map(|s| s.to_string())
@@ -686,7 +679,6 @@ impl MarketFetcher {
                                     status: "active".to_string(),
                                     end_date,
                                     market_url,
-                                    is_live: false,
                                 });
 
                                 poly_total += 1;
