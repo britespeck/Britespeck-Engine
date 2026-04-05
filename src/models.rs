@@ -25,4 +25,5 @@ pub struct PredictionEvent {
     pub end_date: Option<DateTime<Utc>>,
     pub outcomes: Vec<MarketOutcome>,
     pub market_url: Option<String>,
+    pub is_live: bool,
 }
