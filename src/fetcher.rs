@@ -12,6 +12,18 @@ pub struct MarketFetcher {
 
 fn categorize_by_title(title: &str) -> Option<&'static str> {
     let t = title.to_lowercase();
+
+    // Gaming (before Sports so esports doesn't fall into Sports)
+    if t.contains("esports") || t.contains("e-sports") || t.contains("valorant")
+        || t.contains("league of legends") || t.contains("lcs") || t.contains("dota")
+        || t.contains("csgo") || t.contains("cs2") || t.contains("overwatch league")
+        || t.contains("call of duty league") || t.contains("cdl")
+        || t.contains("gaming") || t.contains("twitch") || t.contains("fortnite")
+        || t.contains("apex legends") || t.contains("rocket league")
+    {
+        return Some("Gaming");
+    }
+
     if t.contains("nba") || t.contains("nfl") || t.contains("mlb") || t.contains("nhl")
         || t.contains("premier league") || t.contains("uefa") || t.contains("soccer")
         || t.contains("tennis") || t.contains("f1") || t.contains("nascar")
@@ -24,6 +36,20 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
     {
         return Some("Sports");
     }
+
+    // Global (before Politics so geopolitical doesn't fall into Politics)
+    if t.contains("war") || t.contains("ukraine") || t.contains("russia")
+        || t.contains("china") || t.contains("iran") || t.contains("israel")
+        || t.contains("gaza") || t.contains("ceasefire") || t.contains("sanctions")
+        || t.contains("united nations") || t.contains("diplomatic")
+        || t.contains("geopolit") || t.contains("territorial")
+        || t.contains("invasion") || t.contains("missile") || t.contains("nuclear")
+        || t.contains("north korea") || t.contains("taiwan")
+        || t.contains("middle east") || t.contains("houthi")
+    {
+        return Some("Global");
+    }
+
     if t.contains("president") || t.contains("trump") || t.contains("biden")
         || t.contains("congress") || t.contains("senate") || t.contains("election")
         || t.contains("republican") || t.contains("democrat") || t.contains("governor")
@@ -435,6 +461,7 @@ impl MarketFetcher {
                                     "sports" => "Sports".to_string(),
                                     "crypto" => "Crypto".to_string(),
                                     "climate" | "weather" => "Weather".to_string(),
+                                    "gaming" | "esports" => "Gaming".to_string(),
                                     _ => "Social".to_string(),
                                 }
                             });
@@ -648,7 +675,9 @@ impl MarketFetcher {
                                             })
                                             .collect();
                                         let all_tags = tag_str.join(" ");
-                                        if all_tags.contains("politic") || all_tags.contains("election") {
+                                        if all_tags.contains("esport") || all_tags.contains("gaming") {
+                                            "Gaming".to_string()
+                                        } else if all_tags.contains("politic") || all_tags.contains("election") {
                                             "Politics".to_string()
                                         } else if all_tags.contains("crypto") || all_tags.contains("bitcoin") {
                                             "Crypto".to_string()
@@ -660,6 +689,8 @@ impl MarketFetcher {
                                             "Economics".to_string()
                                         } else if all_tags.contains("climate") || all_tags.contains("weather") {
                                             "Weather".to_string()
+                                        } else if all_tags.contains("geopolit") || all_tags.contains("war") || all_tags.contains("global") {
+                                            "Global".to_string()
                                         } else {
                                             "Social".to_string()
                                         }
