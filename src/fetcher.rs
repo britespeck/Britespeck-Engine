@@ -80,135 +80,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
     None
 }
 
-/// Detect if a Kalshi event is truly "live" (in-progress right now).
-/// Kalshi marks events on its Live tab when they have active markets
-/// with a close_time that is imminent (within ~12h) and the event
-/// belongs to a real-time category (sports, elections, etc.).
-fn detect_kalshi_is_live(event: &Value, category: &str, end_date: Option<DateTime<Utc>>) -> bool {
-    let now = Utc::now();
-
-    // Check if any nested market has "can_close_early" or a very near close_time
-    let markets = event.get("markets").and_then(|m| m.as_array());
-
-    // Method 1: Kalshi explicitly marks some events with a "strike_type" or
-    // "expected_expiration_time" within the next 12 hours for live events
-    if let Some(end) = end_date {
-        let hours_until_close = (end - now).num_hours();
-        // If closing within 12 hours AND it's a real-time category, it's likely live
-        if hours_until_close >= 0 && hours_until_close <= 12 {
-            let live_categories = ["Sports", "Politics", "Weather", "Economics"];
-            if live_categories.contains(&category) {
-                return true;
-            }
-        }
-    }
-
-    // Method 2: Check nested markets for "can_close_early" = true (used for sports)
-    if let Some(mkts) = markets {
-        for m in mkts {
-            let can_close_early = m.get("can_close_early")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let status = m.get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            if can_close_early && status == "active" {
-                return true;
-            }
-        }
-    }
-
-    // Method 3: Title-based heuristics for games/matches happening now
-    let title_lower = event.get("title")
-        .and_then(|t| t.as_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let live_keywords = [" vs ", " v ", "game ", "match ", "race ", "fight "];
-    if live_keywords.iter().any(|kw| title_lower.contains(kw)) {
-        if let Some(end) = end_date {
-            let hours_until_close = (end - now).num_hours();
-            if hours_until_close >= 0 && hours_until_close <= 24 {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Detect if a Polymarket event is truly "live" (in-progress right now).
-/// Polymarket shows a pulsing live indicator on sports, crypto, esports events
-/// when enableOrderBook is true and the event has started but not ended.
-fn detect_poly_is_live(event: &Value, markets: &[&Value], category: &str, end_date: Option<DateTime<Utc>>) -> bool {
-    let now = Utc::now();
-
-    // Method 1: Check for explicit "startDate" / "game_start_date" in the past
-    let start_date = event.get("startDate")
-        .or_else(|| event.get("gameStartDate"))
-        .or_else(|| event.get("game_start_date"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| parse_datetime(s));
-
-    if let Some(start) = start_date {
-        if start <= now {
-            // Started already — check it hasn't ended
-            if let Some(end) = end_date {
-                if end > now {
-                    return true;
-                }
-            } else {
-                // No end date but has started — likely live
-                return true;
-            }
-        }
-    }
-
-    // Method 2: Check nested markets for "enableOrderBook" + "active" = true
-    // combined with real-time categories
-    let live_categories = ["Sports", "Crypto", "Social"];
-    if live_categories.contains(&category) {
-        for m in markets {
-            let enable_ob = m.get("enableOrderBook")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let active = m.get("active")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let accepting = m.get("acceptingOrders")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
-            if enable_ob && active && accepting {
-                // If it's a sports/crypto event with active order book,
-                // and closing within 24h, it's live
-                if let Some(end) = end_date {
-                    let hours_left = (end - now).num_hours();
-                    if hours_left >= 0 && hours_left <= 24 {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    // Method 3: Title heuristics for live matches
-    let title_lower = event.get("title")
-        .and_then(|t| t.as_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let live_keywords = [" vs ", " v ", "game ", "match ", "race ", "bout "];
-    if live_keywords.iter().any(|kw| title_lower.contains(kw)) {
-        if let Some(end) = end_date {
-            let hours_left = (end - now).num_hours();
-            if hours_left >= 0 && hours_left <= 12 {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
 fn extract_image(value: &Value, keys: &[&str]) -> Option<String> {
     for key in keys {
         if let Some(v) = value.get(key).and_then(|v| v.as_str()) {
@@ -632,9 +503,6 @@ impl MarketFetcher {
                             ticker.split('-').next().unwrap_or(&ticker).to_lowercase()
                         ));
 
-                        // ── LIVE DETECTION ──
-                        let is_live = detect_kalshi_is_live(event, &category, end_date);
-
                         unified.push(PredictionEvent {
                             id: Uuid::new_v4(),
                             title,
@@ -649,7 +517,6 @@ impl MarketFetcher {
                             status: "active".to_string(),
                             end_date,
                             market_url,
-                            is_live,
                         });
                     }
 
@@ -855,9 +722,6 @@ impl MarketFetcher {
                                         }
                                     });
 
-                                // ── LIVE DETECTION ──
-                                let is_live = detect_poly_is_live(event, &active_markets, &category, end_date);
-
                                 unified.push(PredictionEvent {
                                     id: Uuid::new_v4(),
                                     title,
@@ -872,7 +736,6 @@ impl MarketFetcher {
                                     status: "active".to_string(),
                                     end_date,
                                     market_url,
-                                    is_live,
                                 });
 
                                 poly_total += 1;
@@ -896,8 +759,7 @@ impl MarketFetcher {
             }
         }
 
-        let live_count = unified.iter().filter(|e| e.is_live).count();
-        println!("✅ Total unified events: {} ({} live)", unified.len(), live_count);
+        println!("✅ Total unified events: {}", unified.len());
         unified
     }
 }
