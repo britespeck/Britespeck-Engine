@@ -2,6 +2,10 @@ mod models;
 mod fetcher;
 mod strategy;
 mod user_bots;
+mod trades;
+mod alpha;
+mod ev_engine;
+mod endpoints;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -10,12 +14,13 @@ use std::env;
 use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
-use axum::{routing::{get, patch}, extract::{State, Query, Path}, Json, Router};
+use axum::{routing::{get, post, patch}, extract::{State, Query, Path}, Json, Router};
 use tower_http::cors::CorsLayer;
 use serde::{Serialize, Deserialize};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use user_bots::{get_user_bot, create_user_bot, update_user_bot};
+use endpoints::{get_trades, get_alpha_signals, calculate_ev};
 
 #[derive(Serialize, sqlx::FromRow)]
 struct PredictionEvent {
@@ -156,6 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/backtest", get(get_backtest))
         .route("/user_bots", get(get_user_bot).post(create_user_bot))
         .route("/user_bots/:id", patch(update_user_bot))
+        // Alpha engine endpoints
+        .route("/trades", get(get_trades))
+        .route("/alpha_signals", get(get_alpha_signals))
+        .route("/calculate_ev", post(calculate_ev))
         .layer(CorsLayer::permissive())
         .with_state(api_pool);
 
