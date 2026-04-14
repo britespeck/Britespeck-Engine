@@ -140,7 +140,7 @@ pub fn compute_edge(req: &EvRequest) -> EvResult {
     let edge_yes = req.ai_probability - req.market_price;
     let edge_no = (1.0 - req.ai_probability) - (1.0 - req.market_price);
 
-    let (recommended_side, edge_percent, best_ev) = if edge_yes > edge_no && edge_yes > MIN_EDGE_THRESHOLD {
+    let (recommended_side, edge_percent, _best_ev) = if edge_yes > edge_no && edge_yes > MIN_EDGE_THRESHOLD {
         ("yes".to_string(), edge_yes * 100.0, ev_yes)
     } else if edge_no > MIN_EDGE_THRESHOLD {
         ("no".to_string(), edge_no * 100.0, ev_no)

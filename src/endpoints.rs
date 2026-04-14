@@ -152,7 +152,7 @@ async fn backtest_handler(
                 if rsi <= params.rsi_buy {
                     position = Some(price);
                     backtest_trades.push(BacktestTrade {
-                        timestamp,
+                        timestamp: timestamp.to_string(),
                         action: "buy".to_string(),
                         price,
                         rsi,
@@ -173,7 +173,7 @@ async fn backtest_handler(
                     if drawdown > max_drawdown { max_drawdown = drawdown; }
 
                     backtest_trades.push(BacktestTrade {
-                        timestamp,
+                        timestamp: timestamp.to_string(),
                         action: "sell".to_string(),
                         price,
                         rsi,

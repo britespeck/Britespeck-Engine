@@ -232,7 +232,7 @@ pub async fn persist_trades(pool: &PgPool, trades: &[RawTrade]) -> anyhow::Resul
         );
         let mut params: Vec<String> = Vec::new();
 
-        for (i, t) in chunk.iter().enumerate() {
+        for (i, _t) in chunk.iter().enumerate() {
             let offset = i * 8;
             params.push(format!(
                 "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
