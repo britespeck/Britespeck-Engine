@@ -14,7 +14,7 @@ use std::env;
 use std::str::FromStr;
 use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
-use axum::{routing::{get, post, patch}, extract::{State, Query, Path}, Json, Router};
+use axum::{routing::{get, patch}, extract::{State, Query, Path}, Json, Router};
 use tower_http::cors::CorsLayer;
 use serde::{Serialize, Deserialize};
 use axum::http::StatusCode;
@@ -133,7 +133,6 @@ async fn patch_event_icon(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
 
-    // Initialize tracing
     tracing_subscriber::fmt::init();
 
     let database_url = env::var("DATABASE_URL")
@@ -156,9 +155,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✅ Connected to database (dual pool: 10 API + 10 sync)");
 
-    // Alpha engine state + routes
-    let alpha_state = endpoints::AppState { pool: api_pool.clone() };
-
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
         .route("/prediction_events/:id/icon", patch(patch_event_icon))
@@ -166,17 +162,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/backtest", get(get_backtest))
         .route("/user_bots", get(get_user_bot).post(create_user_bot))
         .route("/user_bots/:id", patch(update_user_bot))
-        .merge(endpoints::alpha_routes(alpha_state))
+        .merge(endpoints::alpha_routes())
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
 
-    // Spawn trade ingestion + alpha detection background loops
     let trade_pool = api_pool.clone();
     let trade_client = reqwest::Client::new();
     tokio::spawn(trades::run_trade_ingestion_loop(trade_pool, trade_client));
     tokio::spawn(alpha::run_alpha_detection_loop(api_pool.clone()));
 
-    // Spawn market sync loop
     tokio::spawn(async move {
         let fetcher = MarketFetcher::new();
         let mut kalshi_headers = HeaderMap::new();
