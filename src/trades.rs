@@ -369,7 +369,7 @@ pub async fn run_trade_ingestion_loop(pool: PgPool, client: Client) {
                 .ok()
                 .flatten();
 
-            let trades = match market.platform.as_str() {
+            let trades = match market.platform.to_lowercase().as_str() {
                 "polymarket" => {
                     fetch_polymarket_trades(&client, &market.platform_token, watermark).await
                 }
