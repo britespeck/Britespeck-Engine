@@ -262,34 +262,3 @@ async fn get_trade_signals_handler(
         )),
     }
 }
-
-// ── Main.rs Integration Guide ──────────────────────────────────────
-
-/// Add to your main.rs:
-///
-/// ```rust
-/// mod trades;
-/// mod alpha;
-/// mod ev_engine;
-/// mod endpoints;
-///
-/// #[tokio::main]
-/// async fn main() {
-///     // ... existing setup ...
-///
-///     let state = endpoints::AppState { pool: pool.clone() };
-///
-///     // Spawn background loops
-///     let pool_clone = pool.clone();
-///     let client = reqwest::Client::new();
-///     tokio::spawn(trades::run_trade_ingestion_loop(pool_clone, client));
-///     tokio::spawn(alpha::run_alpha_detection_loop(pool.clone()));
-///
-///     // Add alpha routes to existing router
-///     let app = Router::new()
-///         // ... existing routes ...
-///         .merge(endpoints::alpha_routes(state));
-///
-///     // ... start server ...
-/// }
-/// ```
