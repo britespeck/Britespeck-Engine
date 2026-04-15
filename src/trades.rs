@@ -1,9 +1,4 @@
 //! Raw trade ingestion from Polymarket CLOB and Kalshi APIs.
-//!
-//! Polls both platforms every 30-60 seconds for active markets,
-//! storing individual trades (not bucketed candles) so that hidden
-//! wicks, volume spikes, and liquidity gaps are preserved.
-
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -32,7 +27,6 @@ pub struct RawTrade {
     pub ingested_at: DateTime<Utc>,
 }
 
-/// Polymarket CLOB trade from their API
 #[derive(Debug, Deserialize)]
 struct PolyTrade {
     #[serde(rename = "asset_id")]
@@ -44,7 +38,6 @@ struct PolyTrade {
     match_time: Option<String>,
 }
 
-/// Kalshi trade from their API
 #[derive(Debug, Deserialize)]
 struct KalshiTrade {
     ticker: String,
@@ -86,7 +79,6 @@ const MAX_TRADES_PER_FETCH: usize = 500;
 
 // ── Polymarket CLOB Ingestion ──────────────────────────────────────
 
-/// Fetch raw trades for a specific Polymarket token/asset with L2 Authentication.
 pub async fn fetch_polymarket_trades(
     client: &Client,
     token_id: &str,
@@ -95,13 +87,13 @@ pub async fn fetch_polymarket_trades(
     let mut trades = Vec::new();
     let mut cursor: Option<String> = None;
 
-    // Load credentials from ECS Env
     let api_key = env::var("POLYMARKET_API_KEY").unwrap_or_default();
-    let secret = env::var("POLYMARKET_SECRET").unwrap_or_default();
+    let secret_str = env::var("POLYMARKET_SECRET").unwrap_or_default();
     let passphrase = env::var("POLYMARKET_PASSPHRASE").unwrap_or_default();
 
     loop {
-        let timestamp = Utc::now().timestamp().to_string();
+        // Subtract 3 seconds to account for clock skew/drift
+        let timestamp = (Utc::now().timestamp() - 3).to_string();
         let method = "GET";
         
         let mut request_path = format!("/trades?asset_id={}&limit={}", token_id, MAX_TRADES_PER_FETCH);
@@ -111,7 +103,7 @@ pub async fn fetch_polymarket_trades(
 
         // Generate POLY-SIGNATURE
         let message = format!("{}{}{}", timestamp, method, request_path);
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret_str.as_bytes())
             .map_err(|e| anyhow::anyhow!("HMAC error: {}", e))?;
         mac.update(message.as_bytes());
         let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
@@ -174,7 +166,6 @@ pub async fn fetch_polymarket_trades(
 
 // ── Kalshi Trade Ingestion ─────────────────────────────────────────
 
-/// Fetch raw trades for a specific Kalshi ticker.
 pub async fn fetch_kalshi_trades(
     client: &Client,
     ticker: &str,
@@ -242,7 +233,6 @@ pub async fn fetch_kalshi_trades(
 
 // ── Database Operations ────────────────────────────────────────────
 
-/// Bulk insert raw trades into RDS.
 pub async fn persist_trades(pool: &PgPool, trades: &[RawTrade]) -> anyhow::Result<usize> {
     if trades.is_empty() { return Ok(0); }
     let mut inserted = 0usize;
@@ -284,7 +274,6 @@ pub async fn persist_trades(pool: &PgPool, trades: &[RawTrade]) -> anyhow::Resul
     Ok(inserted)
 }
 
-/// Fetch trades from the database (used by endpoints.rs)
 pub async fn get_trades(
     pool: &PgPool,
     event_id: &str,
@@ -317,7 +306,6 @@ pub async fn get_trades(
     Ok(trades)
 }
 
-/// Get the latest trade timestamp for a given event to use as watermark.
 pub async fn get_latest_trade_ts(
     pool: &PgPool,
     event_id: &str,
@@ -337,9 +325,10 @@ pub async fn get_latest_trade_ts(
 }
 
 pub async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<TrackedMarket>> {
+    // CORRECTED: Changed table from 'markets' to 'prediction_events' and matched columns
     let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT id, platform, external_id FROM markets 
-         WHERE active = true 
+        "SELECT id, platform, external_id FROM prediction_events 
+         WHERE status = 'active' OR status = 'open'
          ORDER BY volume_24h DESC NULLS LAST
          LIMIT 200"
     )
@@ -358,7 +347,6 @@ pub async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<TrackedMark
 
 // ── Loops ──────────────────────────────────────────────────────────
 
-/// Main background loop: polls active markets for raw trades.
 pub async fn run_trade_ingestion_loop(pool: PgPool, client: Client) {
     tracing::info!("🔄 Starting raw trade ingestion loop ({}s interval)", INGEST_INTERVAL_SECS);
     let mut interval = time::interval(Duration::from_secs(INGEST_INTERVAL_SECS));
