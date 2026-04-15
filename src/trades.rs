@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time;
 use uuid::Uuid;
 
-// Auth imports
+// Auth & Encoding imports
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use base64::{Engine as _, engine::general_purpose};
@@ -39,6 +39,13 @@ struct PolyTrade {
 }
 
 #[derive(Debug, Deserialize)]
+struct PolyTradesResponse {
+    #[serde(default)]
+    data: Vec<PolyTrade>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct KalshiTrade {
     ticker: String,
     #[serde(rename = "yes_price")]
@@ -57,13 +64,6 @@ struct KalshiTradesResponse {
     cursor: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct PolyTradesResponse {
-    #[serde(default)]
-    data: Vec<PolyTrade>,
-    next_cursor: Option<String>,
-}
-
 pub struct TrackedMarket {
     pub event_id: String,
     pub platform: String,
@@ -72,7 +72,7 @@ pub struct TrackedMarket {
 
 // ── Constants ──────────────────────────────────────────────────────
 
-const POLYMARKET_CLOB_URL: &str = "https://polymarket.com";
+const POLYMARKET_CLOB_URL: &str = "https://clob.polymarket.com";
 const KALSHI_API_URL: &str = "https://kalshi.com";
 const INGEST_INTERVAL_SECS: u64 = 45; 
 const MAX_TRADES_PER_FETCH: usize = 500;
@@ -84,15 +84,15 @@ pub async fn fetch_polymarket_trades(
     token_id: &str,
     since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<RawTrade>> {
-    // SAFETY: Skip if we accidentally passed a UUID instead of an Asset ID
-    if token_id.contains('-') {
+    // HARD FILTER: Skip if token is not a Hex string (0x...) or is a UUID.
+    // This prevents hitting the main website redirect which returns HTML.
+    if token_id.contains('-') || !token_id.starts_with("0x") {
         return Ok(Vec::new());
     }
 
     let mut trades = Vec::new();
     let mut cursor: Option<String> = None;
 
-    // Pulls from ECS Environment automatically
     let api_key = env::var("POLYMARKET_API_KEY").unwrap_or_default();
     let secret_str = env::var("POLYMARKET_SECRET").unwrap_or_default();
     let passphrase = env::var("POLYMARKET_PASSPHRASE").unwrap_or_default();
@@ -106,7 +106,7 @@ pub async fn fetch_polymarket_trades(
             request_path.push_str(&format!("&next_cursor={}", c));
         }
 
-        // Generate POLY-SIGNATURE
+        // HMAC signature logic
         let message = format!("{}{}{}", timestamp, method, request_path);
         let mut mac = Hmac::<Sha256>::new_from_slice(secret_str.as_bytes())
             .map_err(|e| anyhow::anyhow!("HMAC error: {}", e))?;
@@ -125,21 +125,21 @@ pub async fn fetch_polymarket_trades(
             .send()
             .await?;
 
+        // Catch non-JSON responses early
         let status = resp.status();
-        if !status.is_success() {
-            let body_err = resp.text().await.unwrap_or_default();
-            tracing::error!("Polymarket API Error ({}) for {}: {}", status, token_id, body_err);
-            break;
+        let content_type = resp.headers()
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or_default();
+
+        if !status.is_success() || !content_type.contains("application/json") {
+            return Ok(Vec::new()); // Silent skip for redirects/HTML
         }
 
-        // Capture body as text first to debug decoding errors
         let body_text = resp.text().await?;
         let body: PolyTradesResponse = match serde_json::from_str(&body_text) {
             Ok(b) => b,
-            Err(e) => {
-                tracing::error!("JSON Decode Failure for {}: {}. Body: {}", token_id, e, body_text);
-                break;
-            }
+            Err(_) => return Ok(Vec::new()), 
         };
 
         for t in &body.data {
@@ -395,10 +395,10 @@ pub async fn run_trade_ingestion_loop(pool: PgPool, client: Client) {
                         Err(e) => tracing::error!("Persist failed for {}: {}", market.event_id, e),
                     }
                 }
-                Err(e) => tracing::warn!("Fetch failed for {}: {}", market.event_id, e),
+                Err(_) => {} // Silent skip for invalid tokens/redirects
                 _ => {}
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
         }
 
         if total_ingested > 0 {
