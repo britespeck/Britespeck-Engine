@@ -84,15 +84,20 @@ pub async fn fetch_polymarket_trades(
     token_id: &str,
     since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<RawTrade>> {
+    // SAFETY: Skip if we accidentally passed a UUID instead of an Asset ID
+    if token_id.contains('-') {
+        return Ok(Vec::new());
+    }
+
     let mut trades = Vec::new();
     let mut cursor: Option<String> = None;
 
+    // Pulls from ECS Environment automatically
     let api_key = env::var("POLYMARKET_API_KEY").unwrap_or_default();
     let secret_str = env::var("POLYMARKET_SECRET").unwrap_or_default();
     let passphrase = env::var("POLYMARKET_PASSPHRASE").unwrap_or_default();
 
     loop {
-        // Subtract 3 seconds to account for clock skew/drift
         let timestamp = (Utc::now().timestamp() - 3).to_string();
         let method = "GET";
         
@@ -120,14 +125,22 @@ pub async fn fetch_polymarket_trades(
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        if !status.is_success() {
             let body_err = resp.text().await.unwrap_or_default();
-            tracing::warn!("Polymarket CLOB returned {}: {}", status, body_err);
+            tracing::error!("Polymarket API Error ({}) for {}: {}", status, token_id, body_err);
             break;
         }
 
-        let body: PolyTradesResponse = resp.json().await?;
+        // Capture body as text first to debug decoding errors
+        let body_text = resp.text().await?;
+        let body: PolyTradesResponse = match serde_json::from_str(&body_text) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("JSON Decode Failure for {}: {}. Body: {}", token_id, e, body_text);
+                break;
+            }
+        };
 
         for t in &body.data {
             let price: f64 = t.price.parse().unwrap_or(0.0);
@@ -325,7 +338,6 @@ pub async fn get_latest_trade_ts(
 }
 
 pub async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<TrackedMarket>> {
-    // UPDATED: Matched to your actual RDS schema
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT id, platform, external_id FROM prediction_events 
          WHERE status = 'active' OR status = 'open'
