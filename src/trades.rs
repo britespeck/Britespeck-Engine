@@ -325,8 +325,8 @@ pub async fn get_latest_trade_ts(
 }
 
 pub async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<TrackedMarket>> {
-    // CORRECTED: Changed table from 'markets' to 'prediction_events' and matched columns
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
+    // UPDATED: Matched to your actual RDS schema
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT id, platform, external_id FROM prediction_events 
          WHERE status = 'active' OR status = 'open'
          ORDER BY volume_24h DESC NULLS LAST
@@ -338,7 +338,7 @@ pub async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<TrackedMark
     Ok(rows
         .into_iter()
         .map(|(id, platform, ext_id)| TrackedMarket {
-            event_id: id,
+            event_id: id.to_string(),
             platform,
             platform_token: ext_id,
         })
