@@ -73,7 +73,7 @@ pub struct TrackedMarket {
 // ── Constants ──────────────────────────────────────────────────────
 
 const POLYMARKET_CLOB_URL: &str = "https://clob.polymarket.com";
-const KALSHI_API_URL: &str = "https://kalshi.com";
+const KALSHI_API_URL: &str = "https://api.elections.kalshi.com/trade-api/v2";
 const INGEST_INTERVAL_SECS: u64 = 45; 
 const MAX_TRADES_PER_FETCH: usize = 500;
 
@@ -84,8 +84,7 @@ pub async fn fetch_polymarket_trades(
     token_id: &str,
     since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<RawTrade>> {
-    // HARD FILTER: Skip if token is not a Hex string (0x...) or is a UUID.
-    // This prevents hitting the main website redirect which returns HTML.
+    // SKIP if token is not a Hex string (0x...) or is a UUID.
     if token_id.contains('-') || !token_id.starts_with("0x") {
         return Ok(Vec::new());
     }
@@ -106,7 +105,6 @@ pub async fn fetch_polymarket_trades(
             request_path.push_str(&format!("&next_cursor={}", c));
         }
 
-        // HMAC signature logic
         let message = format!("{}{}{}", timestamp, method, request_path);
         let mut mac = Hmac::<Sha256>::new_from_slice(secret_str.as_bytes())
             .map_err(|e| anyhow::anyhow!("HMAC error: {}", e))?;
@@ -125,7 +123,6 @@ pub async fn fetch_polymarket_trades(
             .send()
             .await?;
 
-        // Catch non-JSON responses early
         let status = resp.status();
         let content_type = resp.headers()
             .get("content-type")
@@ -133,7 +130,7 @@ pub async fn fetch_polymarket_trades(
             .unwrap_or_default();
 
         if !status.is_success() || !content_type.contains("application/json") {
-            return Ok(Vec::new()); // Silent skip for redirects/HTML
+            return Ok(Vec::new()); 
         }
 
         let body_text = resp.text().await?;
@@ -340,7 +337,8 @@ pub async fn get_latest_trade_ts(
 pub async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<TrackedMarket>> {
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT id, platform, external_id FROM prediction_events 
-         WHERE status = 'active' OR status = 'open'
+         WHERE (status ILIKE 'active' OR status ILIKE 'open')
+         AND (platform ILIKE 'polymarket' OR platform ILIKE 'kalshi')
          ORDER BY volume_24h DESC NULLS LAST
          LIMIT 200"
     )
@@ -395,7 +393,7 @@ pub async fn run_trade_ingestion_loop(pool: PgPool, client: Client) {
                         Err(e) => tracing::error!("Persist failed for {}: {}", market.event_id, e),
                     }
                 }
-                Err(_) => {} // Silent skip for invalid tokens/redirects
+                Err(_) => {} 
                 _ => {}
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
