@@ -72,8 +72,8 @@ pub struct TrackedMarket {
 
 // ── Constants ──────────────────────────────────────────────────────
 
-const POLYMARKET_CLOB_URL: &str = "https://clob.polymarket.com";
-const KALSHI_API_URL: &str = "https://api.elections.kalshi.com/trade-api/v2";
+const POLYMARKET_CLOB_URL: &str = "https://polymarket.com";
+const KALSHI_API_URL: &str = "https://kalshi.com";
 const INGEST_INTERVAL_SECS: u64 = 45; 
 const MAX_TRADES_PER_FETCH: usize = 500;
 
@@ -335,12 +335,13 @@ pub async fn get_latest_trade_ts(
 }
 
 pub async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<TrackedMarket>> {
+    // UPDATED: Limit set to 1000 for top-active market focus
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT id, platform, external_id FROM prediction_events 
          WHERE (status ILIKE 'active' OR status ILIKE 'open')
          AND (platform ILIKE 'polymarket' OR platform ILIKE 'kalshi')
          ORDER BY volume_24h DESC NULLS LAST
-         LIMIT 200"
+         LIMIT 1000"
     )
     .fetch_all(pool)
     .await?;
