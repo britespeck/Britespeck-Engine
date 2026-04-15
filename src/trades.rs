@@ -335,13 +335,13 @@ pub async fn get_latest_trade_ts(
 }
 
 pub async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<TrackedMarket>> {
-    // UPDATED: Limit set to 1000 for top-active market focus
+    // UPDATED: Limit now set to 500 for high-performance live trade ingestion
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT id, platform, external_id FROM prediction_events 
          WHERE (status ILIKE 'active' OR status ILIKE 'open')
          AND (platform ILIKE 'polymarket' OR platform ILIKE 'kalshi')
          ORDER BY volume_24h DESC NULLS LAST
-         LIMIT 1000"
+         LIMIT 500"
     )
     .fetch_all(pool)
     .await?;
