@@ -16,7 +16,7 @@ use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
 use axum::{routing::{get, patch}, extract::{State, Query, Path}, Json, Router};
 use tower_http::cors::CorsLayer;
-use tower_http::compression::CompressionLayer; // ADDED
+use tower_http::compression::CompressionLayer; 
 use serde::{Serialize, Deserialize};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -164,7 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/user_bots", get(get_user_bot).post(create_user_bot))
         .route("/user_bots/:id", patch(update_user_bot))
         .merge(endpoints::alpha_routes())
-        .layer(CompressionLayer::new()) // ADDED: Shrinks JSON for instant load
+        .layer(CompressionLayer::new()) 
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
 
@@ -223,12 +223,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ends.push(e.end_date);
                 }
 
-                // Batch Insert logic to replace 1-by-1 loop
-                let result = sqlx::query!(
+                let result = sqlx::query(
                     r#"
                     INSERT INTO public.prediction_events 
                     (id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date)
-                    SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::float8[], $5::text[], $6::text[], $7::text[], $8::text[], $9::float8[], NOW()::timestamptz[], $11::jsonb[], $12::text[], $13::timestamptz[])
+                    SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::float8[], $5::text[], $6::text[], $7::text[], $8::text[], $9::float8[], NOW()::timestamptz[], $10::jsonb[], $11::text[], $12::timestamptz[])
                     ON CONFLICT (external_id) DO UPDATE SET
                         odds = EXCLUDED.odds,
                         volume_24h = EXCLUDED.volume_24h,
@@ -238,11 +237,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         status = EXCLUDED.status,
                         market_url = COALESCE(EXCLUDED.market_url, public.prediction_events.market_url),
                         category = COALESCE(EXCLUDED.category, public.prediction_events.category)
-                    "#,
-                    &ids, &titles, &platforms, &odds, &categories as &[Option<String>], 
-                    &statuses, &icons as &[Option<String>], &externals, &volumes as &[Option<f64>], 
-                    &outcomes, &urls as &[Option<String>], &ends as &[Option<chrono::DateTime<chrono::Utc>>]
+                    "#
                 )
+                .bind(&ids)
+                .bind(&titles)
+                .bind(&platforms)
+                .bind(&odds)
+                .bind(&categories)
+                .bind(&statuses)
+                .bind(&icons)
+                .bind(&externals)
+                .bind(&volumes)
+                .bind(&outcomes)
+                .bind(&urls)
+                .bind(&ends)
                 .execute(&sync_pool)
                 .await;
 
