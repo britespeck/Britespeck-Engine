@@ -24,7 +24,7 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    # These two steps allow GitHub to build for ARM64 chips
+    # CRITICAL: These two steps allow building for ARM64 on GitHub's Intel servers
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
 
@@ -37,4 +37,5 @@ jobs:
         context: .
         platforms: linux/arm64
         push: true
+        # This tag ensures the full URL is sent to ECR correctly
         tags: ${{ steps.login-ecr.outputs.registry }}/britespeck-engine:latest
