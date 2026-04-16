@@ -58,10 +58,10 @@ struct PatchIconBody {
     icon_url: String,
 }
 
-// FIX 1:  LIMIT 5000 for sub-second website loading
+// FIX 1:  LIMIT 50000 for sub-second website loading
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM public.prediction_events ORDER BY volume_24h DESC NULLS LAST LIMIT 5000"
+        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM public.prediction_events ORDER BY volume_24h DESC NULLS LAST LIMIT 50000"
     )
     .fetch_all(&pool)
     .await
