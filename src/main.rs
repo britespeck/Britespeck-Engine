@@ -16,6 +16,7 @@ use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
 use axum::{routing::{get, patch}, extract::{State, Query, Path}, Json, Router};
 use tower_http::cors::CorsLayer;
+use tower_http::compression::CompressionLayer; // ADDED
 use serde::{Serialize, Deserialize};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -58,7 +59,6 @@ struct PatchIconBody {
     icon_url: String,
 }
 
-// FIX 1:  LIMIT 50000 for sub-second website loading
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
     let rows = sqlx::query_as::<_, PredictionEvent>(
         "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM public.prediction_events ORDER BY volume_24h DESC NULLS LAST LIMIT 50000"
@@ -143,18 +143,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .statement_cache_capacity(0);
 
     let api_pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(25)
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(connect_options.clone())
         .await?;
 
     let sync_pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(15)
         .acquire_timeout(Duration::from_secs(15))
         .connect_with(connect_options)
         .await?;
 
-    println!("✅ Connected to database (dual pool: 10 API + 10 sync)");
+    println!("✅ Connected to database (dual pool: 25 API + 15 sync)");
 
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
@@ -164,6 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/user_bots", get(get_user_bot).post(create_user_bot))
         .route("/user_bots/:id", patch(update_user_bot))
         .merge(endpoints::alpha_routes())
+        .layer(CompressionLayer::new()) // ADDED: Shrinks JSON for instant load
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
 
@@ -193,17 +194,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\n🔄 Starting sync cycle...");
             let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
 
-            let mut success_count = 0u64;
-            let mut fail_count = 0u64;
+            if !events.is_empty() {
+                let mut ids = Vec::new();
+                let mut titles = Vec::new();
+                let mut platforms = Vec::new();
+                let mut odds = Vec::new();
+                let mut categories = Vec::new();
+                let mut statuses = Vec::new();
+                let mut icons = Vec::new();
+                let mut externals = Vec::new();
+                let mut volumes = Vec::new();
+                let mut outcomes = Vec::new();
+                let mut urls = Vec::new();
+                let mut ends = Vec::new();
 
-            for event in &events {
-                let outcomes_json = serde_json::to_value(&event.outcomes).unwrap_or(serde_json::Value::Null);
+                for e in &events {
+                    ids.push(e.id);
+                    titles.push(e.title.clone());
+                    platforms.push(e.platform.clone());
+                    odds.push(e.odds);
+                    categories.push(e.category.clone());
+                    statuses.push(e.status.clone());
+                    icons.push(e.icon_url.clone());
+                    externals.push(e.external_id.clone());
+                    volumes.push(e.volume_24h);
+                    outcomes.push(serde_json::to_value(&e.outcomes).unwrap_or(serde_json::Value::Null));
+                    urls.push(e.market_url.clone());
+                    ends.push(e.end_date);
+                }
 
-                match sqlx::query(
+                // Batch Insert logic to replace 1-by-1 loop
+                let result = sqlx::query!(
                     r#"
                     INSERT INTO public.prediction_events 
                     (id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                    SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::float8[], $5::text[], $6::text[], $7::text[], $8::text[], $9::float8[], NOW()::timestamptz[], $11::jsonb[], $12::text[], $13::timestamptz[])
                     ON CONFLICT (external_id) DO UPDATE SET
                         odds = EXCLUDED.odds,
                         volume_24h = EXCLUDED.volume_24h,
@@ -213,41 +238,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         status = EXCLUDED.status,
                         market_url = COALESCE(EXCLUDED.market_url, public.prediction_events.market_url),
                         category = COALESCE(EXCLUDED.category, public.prediction_events.category)
-                    "#
+                    "#,
+                    &ids, &titles, &platforms, &odds, &categories as &[Option<String>], 
+                    &statuses, &icons as &[Option<String>], &externals, &volumes as &[Option<f64>], 
+                    &outcomes, &urls as &[Option<String>], &ends as &[Option<chrono::DateTime<chrono::Utc>>]
                 )
-                .bind(event.id)
-                .bind(&event.title)
-                .bind(&event.platform)
-                .bind(event.odds)
-                .bind(&event.category)
-                .bind(&event.status)
-                .bind(&event.icon_url)
-                .bind(&event.external_id)
-                .bind(event.volume_24h)
-                .bind(event.updated_at)
-                .bind(outcomes_json)
-                .bind(&event.market_url)
-                .bind(event.end_date)
                 .execute(&sync_pool)
-                .await
-                {
-                    Ok(_) => success_count += 1,
-                    Err(e) => {
-                        if fail_count < 3 {
-                            println!("❌ Upsert failed [{}]: {}", event.external_id, e);
-                        }
-                        fail_count += 1;
-                    }
+                .await;
+
+                match result {
+                    Ok(res) => println!("💾 Batch persisted {} events", res.rows_affected()),
+                    Err(e) => eprintln!("❌ Batch upsert failed: {}", e),
                 }
             }
-
-            println!("💾 Persisted {}/{} events ({} failed)", success_count, events.len(), fail_count);
 
             if let Err(e) = strategy::run_omg_strategy(&sync_pool).await {
                 println!("⚠️ OMG Strategy Warning: {}", e);
             }
 
-            // Sync Loop stays at 30s but processes fewer rows via get_predictions above
             println!("💤 Sleeping 30s...");
             tokio::time::sleep(Duration::from_secs(30)).await;
         }

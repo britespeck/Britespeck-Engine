@@ -6,7 +6,8 @@ edition = "2021"
 [dependencies]
 # Web Server
 axum = "0.7"
-tower-http = { version = "0.5", features = ["cors"] }
+# ADDED: compression-gzip feature here
+tower-http = { version = "0.5", features = ["cors", "compression-gzip"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
@@ -16,7 +17,7 @@ tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Authentication (NEW - Needed for Polymarket)
+# Authentication (Needed for Polymarket)
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.21"
