@@ -126,6 +126,7 @@ fn extract_kalshi_price(market: &Value) -> f64 {
             if let Some(n) = v.as_f64() {
                 if n > 0.0 { return n; }
             }
+            // FIXED: Handle "0.5600" strings
             if let Some(s) = v.as_str() {
                 if let Ok(n) = s.parse::<f64>() {
                     if n > 0.0 { return n; }
@@ -140,6 +141,10 @@ fn extract_market_volume(market: &Value) -> f64 {
     let dollar_candidates = ["dollar_volume", "volume_24h_fp", "volume_fp"];
     for key in &dollar_candidates {
         if let Some(v) = market.get(key) {
+            // FIXED: Handle "10.00" strings
+            if let Some(s) = v.as_str() {
+                if let Ok(n) = s.parse::<f64>() { if n > 0.0 { return n; } }
+            }
             if let Some(n) = v.as_f64() { if n > 0.0 { return n; } }
             if let Some(n) = v.as_i64() { if n > 0 { return n as f64; } }
         }
@@ -192,7 +197,7 @@ impl MarketFetcher {
         event_ticker: &str,
     ) -> Option<String> {
         let event_url = format!(
-            "https://api.elections.kalshi.com/trade-api/v2/events/{}",
+            "https://kalshi.com{}",
             event_ticker
         );
         match client.get(&event_url).send().await {
@@ -238,7 +243,7 @@ impl MarketFetcher {
             .to_lowercase();
 
         let series_url = format!(
-            "https://api.elections.kalshi.com/trade-api/v2/series/{}",
+            "https://kalshi.com{}",
             series_ticker
         );
         match client.get(&series_url).send().await {
@@ -304,7 +309,7 @@ impl MarketFetcher {
 
         loop {
             let mut url = format!(
-                "https://api.elections.kalshi.com/trade-api/v2/events?limit={}&status=open&with_nested_markets=true",
+                "https://kalshi.com{}&status=open&with_nested_markets=true",
                 kalshi_limit
             );
             if let Some(ref cursor) = kalshi_cursor {
@@ -473,7 +478,7 @@ impl MarketFetcher {
                             .and_then(|s| parse_datetime(s));
 
                         let market_url = Some(format!(
-                            "https://kalshi.com/markets/{}",
+                            "https://kalshi.com{}",
                             ticker.split('-').next().unwrap_or(&ticker).to_lowercase()
                         ));
 
@@ -529,7 +534,7 @@ impl MarketFetcher {
             if poly_offset >= poly_max { break; }
 
             let url = format!(
-                "https://gamma-api.polymarket.com/events?closed=false&limit={}&offset={}&order=volume24hr&ascending=false",
+                "https://polymarket.com{}&offset={}&order=volume24hr&ascending=false",
                 poly_limit, poly_offset
             );
 
@@ -568,9 +573,9 @@ impl MarketFetcher {
 
                                 let market_url = slug
                                     .as_ref()
-                                    .map(|s| format!("https://polymarket.com/event/{}", s))
+                                    .map(|s| format!("https://polymarket.com{}", s))
                                     .or_else(|| Some(format!(
-                                        "https://polymarket.com/markets?query={}",
+                                        "https://polymarket.com{}",
                                         urlencoding::encode(&title)
                                     )));
 
