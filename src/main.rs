@@ -227,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     r#"
                     INSERT INTO public.prediction_events 
                     (id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date)
-                    SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::float8[], $5::text[], $6::text[], $7::text[], $8::text[], $9::float8[], NOW()::timestamptz[], $10::jsonb[], $11::text[], $12::timestamptz[])
+                    SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::float8[], $5::text[], $6::text[], $7::text[], $8::text[], $9::float8[], $10::timestamptz[], $11::jsonb[], $12::text[], $13::timestamptz[])
                     ON CONFLICT (external_id) DO UPDATE SET
                         odds = EXCLUDED.odds,
                         volume_24h = EXCLUDED.volume_24h,
@@ -248,6 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bind(&icons)
                 .bind(&externals)
                 .bind(&volumes)
+                .bind(&vec![chrono::Utc::now(); events.len()])
                 .bind(&outcomes)
                 .bind(&urls)
                 .bind(&ends)
