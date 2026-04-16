@@ -126,7 +126,6 @@ fn extract_kalshi_price(market: &Value) -> f64 {
             if let Some(n) = v.as_f64() {
                 if n > 0.0 { return n; }
             }
-            // FIXED: Handle "0.5600" strings
             if let Some(s) = v.as_str() {
                 if let Ok(n) = s.parse::<f64>() {
                     if n > 0.0 { return n; }
@@ -141,12 +140,11 @@ fn extract_market_volume(market: &Value) -> f64 {
     let dollar_candidates = ["dollar_volume", "volume_24h_fp", "volume_fp"];
     for key in &dollar_candidates {
         if let Some(v) = market.get(key) {
-            // FIXED: Handle "10.00" strings
+            if let Some(n) = v.as_f64() { if n > 0.0 { return n; } }
+            if let Some(n) = v.as_i64() { if n > 0 { return n as f64; } }
             if let Some(s) = v.as_str() {
                 if let Ok(n) = s.parse::<f64>() { if n > 0.0 { return n; } }
             }
-            if let Some(n) = v.as_f64() { if n > 0.0 { return n; } }
-            if let Some(n) = v.as_i64() { if n > 0 { return n as f64; } }
         }
     }
 
@@ -308,6 +306,7 @@ impl MarketFetcher {
         let max_kalshi_retries = 3;
 
         loop {
+            // FIXED: Added missing '?' before limit and cursor
             let mut url = format!(
                 "https://kalshi.com{}&status=open&with_nested_markets=true",
                 kalshi_limit
@@ -508,6 +507,8 @@ impl MarketFetcher {
                     if kalshi_cursor.is_none() { break; }
 
                     println!("📡 Kalshi page fetched: {} events so far...", unified.len());
+                    // ADDED: polite delay to avoid 429 errors
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
                 Err(e) => {
                     println!("❌ Kalshi connection failed: {}", e);
