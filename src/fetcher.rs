@@ -14,7 +14,6 @@ pub struct MarketFetcher {
 fn categorize_by_title(title: &str) -> Option<&'static str> {
     let t = title.to_lowercase();
 
-    // GAMING / ESPORTS
     if t.contains("esports") || t.contains("e-sports")
         || t.contains("valorant") || t.contains("league of legends") || t.contains("lcs")
         || t.contains("dota") || t.contains("csgo") || t.contains("cs2")
@@ -30,7 +29,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
         return Some("Gaming");
     }
 
-    // SPORTS
     if t.contains("nba") || t.contains("nfl") || t.contains("mlb") || t.contains("nhl")
         || t.contains("wnba") || t.contains("mls") || t.contains("premier league")
         || t.contains("uefa") || t.contains("champions league") || t.contains("europa league")
@@ -53,7 +51,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
         return Some("Sports");
     }
 
-    // GLOBAL / GEOPOLITICS
     if t.contains("war ") || t.contains("ukraine") || t.contains("russia") || t.contains("putin")
         || t.contains("china") || t.contains("xi jinping") || t.contains("iran") || t.contains("israel")
         || t.contains("gaza") || t.contains("hamas") || t.contains("hezbollah") || t.contains("houthi")
@@ -70,7 +67,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
         return Some("Global");
     }
 
-    // POLITICS
     if t.contains("president") || t.contains("trump") || t.contains("biden") || t.contains("harris")
         || t.contains("vance") || t.contains("desantis") || t.contains("newsom") || t.contains("mamdani")
         || t.contains("congress") || t.contains("senate") || t.contains("house of representatives")
@@ -88,7 +84,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
         return Some("Politics");
     }
 
-    // FINANCE / ECONOMICS
     if t.contains("fed ") || t.contains("federal reserve") || t.contains("powell")
         || t.contains("interest rate") || t.contains("rate cut") || t.contains("rate hike")
         || t.contains("inflation") || t.contains("deflation") || t.contains("gdp")
@@ -106,7 +101,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
         return Some("Finance");
     }
 
-    // CRYPTO
     if t.contains("bitcoin") || t.contains("btc") || t.contains("ethereum") || t.contains("eth ")
         || t.contains("crypto") || t.contains("solana") || t.contains("sol ")
         || t.contains("xrp") || t.contains("ripple") || t.contains("doge") || t.contains("dogecoin")
@@ -120,7 +114,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
         return Some("Crypto");
     }
 
-    // TECH
     if t.contains(" ai ") || t.contains("artificial intelligence")
         || t.contains("openai") || t.contains("chatgpt") || t.contains("gpt-")
         || t.contains("anthropic") || t.contains("claude") || t.contains("gemini")
@@ -137,7 +130,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
         return Some("Tech");
     }
 
-    // CLIMATE / WEATHER
     if t.contains("hurricane") || t.contains("typhoon") || t.contains("cyclone")
         || t.contains("earthquake") || t.contains("tsunami") || t.contains("volcano")
         || t.contains("temperature") || t.contains("heatwave") || t.contains("cold snap")
@@ -150,7 +142,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
         return Some("Climate");
     }
 
-    // CULTURE / ENTERTAINMENT
     if t.contains("oscar") || t.contains("academy award") || t.contains("grammy") || t.contains("emmy")
         || t.contains("golden globe") || t.contains("tony award") || t.contains("eurovision")
         || t.contains("movie") || t.contains("film") || t.contains("box office") || t.contains("blockbuster")
@@ -166,7 +157,6 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
         return Some("Culture");
     }
 
-    // HEALTH
     if t.contains("measles") || t.contains("pandemic") || t.contains("epidemic")
         || t.contains("vaccine") || t.contains("vaccination") || t.contains("covid")
         || t.contains("h5n1") || t.contains("bird flu") || t.contains("monkeypox") || t.contains("mpox")
@@ -204,15 +194,27 @@ fn value_as_bool(v: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Kalshi: prefer new "*_dollars" string fields; fall back to legacy cent integers.
+/// Extract Polymarket CLOB YES token id from a market object.
+/// `clobTokenIds` may arrive as a real JSON array OR a stringified array.
+fn extract_poly_clob_token(market: &Value) -> Option<String> {
+    let v = market.get("clobTokenIds")?;
+    if let Some(arr) = v.as_array() {
+        return arr.first().and_then(|x| x.as_str()).map(|s| s.to_string());
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<Vec<String>>(s) {
+            return parsed.into_iter().next();
+        }
+    }
+    None
+}
+
 fn extract_kalshi_price(market: &Value) -> f64 {
-    // New schema (already in dollars: "0.5600")
     for key in &["last_price_dollars", "yes_bid_dollars", "yes_ask_dollars", "yes_price_dollars"] {
         if let Some(v) = market.get(key).and_then(value_as_f64) {
             if v > 0.0 { return v; }
         }
     }
-    // Legacy schema (cents 0–100)
     for key in &["yes_price", "last_price", "yes_bid", "yes_ask"] {
         if let Some(v) = market.get(key).and_then(value_as_f64) {
             if v > 0.0 {
@@ -223,32 +225,23 @@ fn extract_kalshi_price(market: &Value) -> f64 {
     0.5
 }
 
-/// Kalshi volume in dollars: prefer pre-computed dollar volume, then `*_fp` (contracts) × price,
-/// then legacy `volume_24h` × price.
 fn extract_kalshi_market_volume(market: &Value) -> f64 {
-    // Pre-computed dollar volume
     for key in &["dollar_volume_24h", "dollar_volume"] {
         if let Some(v) = market.get(key).and_then(value_as_f64) {
             if v > 0.0 { return v; }
         }
     }
-
     let price = extract_kalshi_price(market);
-
-    // New: *_fp string fields (contracts)
     for key in &["volume_24h_fp", "volume_fp"] {
         if let Some(v) = market.get(key).and_then(value_as_f64) {
             if v > 0.0 { return v * price; }
         }
     }
-
-    // Legacy: integer contracts
     for key in &["volume_24h", "volume24h", "volume"] {
         if let Some(v) = market.get(key).and_then(value_as_f64) {
             if v > 0.0 { return v * price; }
         }
     }
-
     0.0
 }
 
@@ -297,7 +290,6 @@ fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
     s.parse::<DateTime<Utc>>().ok()
 }
 
-/// Map Kalshi raw category string → app bucket (platform-first).
 fn map_kalshi_category(raw: &str, title: &str) -> String {
     match raw.to_lowercase().as_str() {
         "politics"                                              => "Politics".to_string(),
@@ -311,12 +303,11 @@ fn map_kalshi_category(raw: &str, title: &str) -> String {
         "health"                                                => "Health".to_string(),
         "world" | "global" | "geopolitics"                      => "Global".to_string(),
         _ => categorize_by_title(title)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "Trending".to_string()),
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Trending".to_string()),
     }
 }
 
-/// Map Polymarket tag list → app bucket.
 fn map_poly_category(tags: &[Value], title: &str) -> String {
     let all: String = tags.iter()
         .filter_map(|t| t.get("label").or_else(|| t.get("name")).and_then(|v| v.as_str()))
@@ -360,7 +351,7 @@ impl MarketFetcher {
                 if let Ok(json) = resp.json::<Value>().await {
                     let event_obj = json.get("event").unwrap_or(&json);
                     let img_keys = ["image_url", "featured_image_url", "thumbnail_url",
-                                    "category_image_url", "og_image_url"];
+                        "category_image_url", "og_image_url"];
                     for key in &img_keys {
                         if let Some(url) = event_obj.get(key).and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty() && s.starts_with("http"))
@@ -424,11 +415,6 @@ impl MarketFetcher {
         result
     }
 
-    /// NOTE: Build reqwest clients in main.rs with:
-    ///   reqwest::Client::builder()
-    ///     .user_agent("britespeck-engine/1.0")
-    ///     .timeout(std::time::Duration::from_secs(15))
-    ///     .build()?
     pub async fn fetch_all(
         &self,
         kalshi_client: &reqwest::Client,
@@ -517,7 +503,6 @@ impl MarketFetcher {
             if events.is_empty() { break; }
 
             for event in &events {
-                // Skip determined / settled / closed events
                 let ev_status = event.get("status").and_then(|s| s.as_str()).unwrap_or("").to_lowercase();
                 if matches!(ev_status.as_str(), "determined" | "settled" | "closed" | "finalized") {
                     continue;
@@ -537,7 +522,6 @@ impl MarketFetcher {
 
                 let nested = event.get("markets").and_then(|m| m.as_array()).cloned().unwrap_or_default();
 
-                // Filter active markets, skip determined/settled/closed at market level
                 let active_markets: Vec<Value> = nested.into_iter()
                     .filter(|m| {
                         let s = m.get("status").and_then(|s| s.as_str()).unwrap_or("").to_lowercase();
@@ -550,7 +534,6 @@ impl MarketFetcher {
                 let total_volume: f64 = active_markets.iter().map(extract_kalshi_market_volume).sum();
                 let total_oi: f64 = active_markets.iter().map(extract_kalshi_open_interest).sum();
 
-                // Pick the most contested market (closest to 0.5) as headline odds
                 let best_market = active_markets.iter()
                     .min_by(|a, b| {
                         let da = (extract_kalshi_price(a) - 0.5).abs();
@@ -607,9 +590,9 @@ impl MarketFetcher {
                     status: "active".to_string(),
                     end_date,
                     market_url,
+                    clob_token_yes: None, // Kalshi doesn't use CLOB tokens
                 };
 
-                // 🔑 Dedup by external_id (last write wins)
                 kalshi_map.insert(pe.external_id.clone(), pe);
             }
 
@@ -661,7 +644,6 @@ impl MarketFetcher {
             if events.is_empty() { break; }
 
             for event in &events {
-                // Skip resolved / closed / archived
                 if value_as_bool(event.get("closed").unwrap_or(&Value::Null))
                     || value_as_bool(event.get("archived").unwrap_or(&Value::Null))
                 {
@@ -718,6 +700,9 @@ impl MarketFetcher {
                     .unwrap();
                 let odds = extract_poly_price(best_market);
 
+                // 🔑 Extract CLOB YES token from the headline market
+                let clob_token_yes = extract_poly_clob_token(best_market);
+
                 let mut outcomes: Vec<MarketOutcome> = active_markets.iter().take(5).map(|m| {
                     let name = m.get("question").or_else(|| m.get("groupItemTitle"))
                         .and_then(|t| t.as_str()).unwrap_or("Yes").to_string();
@@ -751,9 +736,9 @@ impl MarketFetcher {
                     status: "active".to_string(),
                     end_date,
                     market_url,
+                    clob_token_yes, // 🔑 Polymarket CLOB YES token
                 };
 
-                // 🔑 Dedup by external_id (last write wins)
                 poly_map.insert(pe.external_id.clone(), pe);
             }
 

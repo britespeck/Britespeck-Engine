@@ -1,4 +1,5 @@
 //! Raw trade ingestion from Polymarket CLOB and Kalshi APIs.
+
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -6,12 +7,6 @@ use sqlx::PgPool;
 use std::time::Duration;
 use tokio::time;
 use uuid::Uuid;
-
-// Auth & Encoding imports
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use base64::{Engine as _, engine::general_purpose};
-use std::env;
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -50,7 +45,8 @@ struct KalshiTrade {
     ticker: String,
     #[serde(rename = "yes_price")]
     yes_price: f64,
-    #[serde(rename = "no_price")]
+    #[serde(rename = "no_price", default)]
+    #[allow(dead_code)]
     no_price: f64,
     count: Option<f64>,
     #[serde(rename = "created_time")]
@@ -60,84 +56,88 @@ struct KalshiTrade {
 
 #[derive(Debug, Deserialize)]
 struct KalshiTradesResponse {
+    #[serde(default)]
     trades: Vec<KalshiTrade>,
     cursor: Option<String>,
 }
 
 pub struct TrackedMarket {
-    pub event_id: String,
-    pub platform: String,
-    pub platform_token: String,
+    pub event_id: String,        // canonical "<platform>:<external_id>"
+    pub platform: String,        // "polymarket" | "kalshi"
+    pub platform_token: String,  // Polymarket: CLOB token (0x…). Kalshi: market ticker.
 }
 
 // ── Constants ──────────────────────────────────────────────────────
 
-const POLYMARKET_CLOB_URL: &str = "https://polymarket.com";
-const KALSHI_API_URL: &str = "https://kalshi.com";
-const INGEST_INTERVAL_SECS: u64 = 45; 
+// ✅ Real API hosts (not the consumer frontends)
+const POLYMARKET_CLOB_URL: &str = "https://clob.polymarket.com";
+const KALSHI_API_URL: &str = "https://api.elections.kalshi.com/trade-api/v2";
+
+const INGEST_INTERVAL_SECS: u64 = 45;
 const MAX_TRADES_PER_FETCH: usize = 500;
 
 // ── Polymarket CLOB Ingestion ──────────────────────────────────────
+//
+// Public endpoint — no HMAC required.
+// GET https://clob.polymarket.com/trades?market=<CLOB_TOKEN>&limit=500
+//
+// `token_id` MUST be a CLOB token id (0x-prefixed hex). Anything else
+// (e.g. Gamma event UUID) is skipped — populate `clob_token_yes` in
+// the fetcher so this receives a real token.
 
 pub async fn fetch_polymarket_trades(
     client: &Client,
     token_id: &str,
     since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<RawTrade>> {
-    // SKIP if token is not a Hex string (0x...) or is a UUID.
-    if token_id.contains('-') || !token_id.starts_with("0x") {
+    if token_id.is_empty() || !token_id.starts_with("0x") {
         return Ok(Vec::new());
     }
 
     let mut trades = Vec::new();
     let mut cursor: Option<String> = None;
 
-    let api_key = env::var("POLYMARKET_API_KEY").unwrap_or_default();
-    let secret_str = env::var("POLYMARKET_SECRET").unwrap_or_default();
-    let passphrase = env::var("POLYMARKET_PASSPHRASE").unwrap_or_default();
-
     loop {
-        let timestamp = (Utc::now().timestamp() - 3).to_string();
-        let method = "GET";
-        
-        let mut request_path = format!("/trades?asset_id={}&limit={}", token_id, MAX_TRADES_PER_FETCH);
+        let mut url = format!(
+            "{}/trades?market={}&limit={}",
+            POLYMARKET_CLOB_URL, token_id, MAX_TRADES_PER_FETCH
+        );
         if let Some(ref c) = cursor {
-            request_path.push_str(&format!("&next_cursor={}", c));
+            url.push_str(&format!("&next_cursor={}", c));
         }
-
-        let message = format!("{}{}{}", timestamp, method, request_path);
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret_str.as_bytes())
-            .map_err(|e| anyhow::anyhow!("HMAC error: {}", e))?;
-        mac.update(message.as_bytes());
-        let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-
-        let url = format!("{}{}", POLYMARKET_CLOB_URL, request_path);
 
         let resp = client
             .get(&url)
-            .header("POLY-API-KEY", &api_key)
-            .header("POLY-PASSPHRASE", &passphrase)
-            .header("POLY-TIMESTAMP", &timestamp)
-            .header("POLY-SIGNATURE", &signature)
             .timeout(Duration::from_secs(10))
             .send()
             .await?;
 
         let status = resp.status();
-        let content_type = resp.headers()
+        let content_type = resp
+            .headers()
             .get("content-type")
             .and_then(|h| h.to_str().ok())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_string();
 
         if !status.is_success() || !content_type.contains("application/json") {
-            return Ok(Vec::new()); 
+            tracing::warn!(
+                "Polymarket trades non-OK ({} / {}) for token {}",
+                status, content_type, token_id
+            );
+            break;
         }
 
         let body_text = resp.text().await?;
         let body: PolyTradesResponse = match serde_json::from_str(&body_text) {
             Ok(b) => b,
-            Err(_) => return Ok(Vec::new()), 
+            Err(e) => {
+                tracing::warn!("Polymarket trades JSON parse error: {}", e);
+                break;
+            }
         };
+
+        let page_len = body.data.len();
 
         for t in &body.data {
             let price: f64 = t.price.parse().unwrap_or(0.0);
@@ -150,12 +150,16 @@ pub async fn fetch_polymarket_trades(
                 .unwrap_or_else(Utc::now);
 
             if let Some(ref since_ts) = since {
-                if ts <= *since_ts { continue; }
+                if ts <= *since_ts {
+                    continue;
+                }
             }
 
+            // 🔑 Canonical event_id matches prediction_events.external_id
+            // (Polymarket fetcher prefixes with "polymarket:")
             trades.push(RawTrade {
                 id: Uuid::new_v4(),
-                event_id: t.asset_id.clone(),
+                event_id: format!("polymarket:{}", t.asset_id),
                 platform: "polymarket".to_string(),
                 price,
                 size,
@@ -166,7 +170,7 @@ pub async fn fetch_polymarket_trades(
         }
 
         cursor = body.next_cursor;
-        if cursor.is_none() || body.data.len() < MAX_TRADES_PER_FETCH {
+        if cursor.is_none() || page_len < MAX_TRADES_PER_FETCH {
             break;
         }
     }
@@ -175,18 +179,25 @@ pub async fn fetch_polymarket_trades(
 }
 
 // ── Kalshi Trade Ingestion ─────────────────────────────────────────
+//
+// GET https://api.elections.kalshi.com/trade-api/v2/markets/trades
+//     ?ticker=<MARKET_TICKER>&limit=500&min_ts=<UNIX>
 
 pub async fn fetch_kalshi_trades(
     client: &Client,
     ticker: &str,
     since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<RawTrade>> {
+    if ticker.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let mut trades = Vec::new();
     let mut cursor: Option<String> = None;
 
     loop {
         let mut url = format!(
-            "{}/markets/{}/trades?limit={}",
+            "{}/markets/trades?ticker={}&limit={}",
             KALSHI_API_URL, ticker, MAX_TRADES_PER_FETCH
         );
         if let Some(ref c) = cursor {
@@ -203,11 +214,19 @@ pub async fn fetch_kalshi_trades(
             .await?;
 
         if !resp.status().is_success() {
-            tracing::warn!("Kalshi trades API returned {}", resp.status());
+            tracing::warn!("Kalshi trades API returned {} for {}", resp.status(), ticker);
             break;
         }
 
-        let body: KalshiTradesResponse = resp.json().await?;
+        let body: KalshiTradesResponse = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Kalshi trades JSON parse error: {}", e);
+                break;
+            }
+        };
+
+        let page_len = body.trades.len();
 
         for t in &body.trades {
             let ts = t
@@ -217,12 +236,18 @@ pub async fn fetch_kalshi_trades(
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(Utc::now);
 
-            let price = t.yes_price / 100.0; 
+            // Kalshi yes_price is in cents (0–100) → dollars
+            let price = if t.yes_price > 1.0 {
+                t.yes_price / 100.0
+            } else {
+                t.yes_price
+            };
             let size = t.count.unwrap_or(1.0);
 
+            // 🔑 Canonical event_id matches prediction_events.external_id
             trades.push(RawTrade {
                 id: Uuid::new_v4(),
-                event_id: t.ticker.clone(),
+                event_id: format!("kalshi:{}", t.ticker),
                 platform: "kalshi".to_string(),
                 price,
                 size,
@@ -233,7 +258,7 @@ pub async fn fetch_kalshi_trades(
         }
 
         cursor = body.cursor;
-        if cursor.is_none() || body.trades.len() < MAX_TRADES_PER_FETCH {
+        if cursor.is_none() || page_len < MAX_TRADES_PER_FETCH {
             break;
         }
     }
@@ -244,7 +269,9 @@ pub async fn fetch_kalshi_trades(
 // ── Database Operations ────────────────────────────────────────────
 
 pub async fn persist_trades(pool: &PgPool, trades: &[RawTrade]) -> anyhow::Result<usize> {
-    if trades.is_empty() { return Ok(0); }
+    if trades.is_empty() {
+        return Ok(0);
+    }
     let mut inserted = 0usize;
 
     for chunk in trades.chunks(100) {
@@ -292,8 +319,9 @@ pub async fn get_trades(
 ) -> anyhow::Result<Vec<RawTrade>> {
     let trades = if let Some(since_ts) = since {
         sqlx::query_as::<_, RawTrade>(
-            "SELECT id, event_id, platform, price, size, side, trade_timestamp, ingested_at FROM raw_trades 
-             WHERE event_id = $1 AND trade_timestamp > $2 
+            "SELECT id, event_id, platform, price, size, side, trade_timestamp, ingested_at \
+             FROM raw_trades \
+             WHERE event_id = $1 AND trade_timestamp > $2 \
              ORDER BY trade_timestamp DESC LIMIT $3"
         )
         .bind(event_id)
@@ -303,8 +331,9 @@ pub async fn get_trades(
         .await?
     } else {
         sqlx::query_as::<_, RawTrade>(
-            "SELECT id, event_id, platform, price, size, side, trade_timestamp, ingested_at FROM raw_trades 
-             WHERE event_id = $1 
+            "SELECT id, event_id, platform, price, size, side, trade_timestamp, ingested_at \
+             FROM raw_trades \
+             WHERE event_id = $1 \
              ORDER BY trade_timestamp DESC LIMIT $2"
         )
         .bind(event_id)
@@ -322,8 +351,8 @@ pub async fn get_latest_trade_ts(
     platform: &str,
 ) -> anyhow::Result<Option<DateTime<Utc>>> {
     let row: Option<(DateTime<Utc>,)> = sqlx::query_as(
-        "SELECT trade_timestamp FROM raw_trades 
-         WHERE event_id = $1 AND platform = $2 
+        "SELECT trade_timestamp FROM raw_trades \
+         WHERE event_id = $1 AND platform = $2 \
          ORDER BY trade_timestamp DESC LIMIT 1"
     )
     .bind(event_id)
@@ -334,32 +363,65 @@ pub async fn get_latest_trade_ts(
     Ok(row.map(|r| r.0))
 }
 
+// ── Active markets selector ────────────────────────────────────────
+//
+// IMPORTANT:
+// - For Kalshi, `platform_token` is the market ticker (stripped of the
+//   "kalshi:" prefix from `external_id`).
+// - For Polymarket, `platform_token` MUST be the CLOB token id
+//   (0x-prefixed hex). Add a `clob_token_yes TEXT` column to
+//   `prediction_events` and populate it in fetcher.rs from
+//   `market.clobTokenIds[0]`. This selector reads it via COALESCE so
+//   markets without a CLOB token are simply skipped at fetch time.
+
 pub async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<TrackedMarket>> {
-    // UPDATED: Limit now set to 500 for high-performance live trade ingestion
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, platform, external_id FROM prediction_events 
-         WHERE (status ILIKE 'active' OR status ILIKE 'open')
-         AND (platform ILIKE 'polymarket' OR platform ILIKE 'kalshi')
-         ORDER BY volume_24h DESC NULLS LAST
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT external_id, platform, clob_token_yes \
+         FROM prediction_events \
+         WHERE (status ILIKE 'active' OR status ILIKE 'open') \
+           AND (platform ILIKE 'polymarket' OR platform ILIKE 'kalshi') \
+         ORDER BY volume_24h DESC NULLS LAST \
          LIMIT 500"
     )
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|(id, platform, ext_id)| TrackedMarket {
-            event_id: id.to_string(),
-            platform,
-            platform_token: ext_id,
-        })
-        .collect())
+    let mut markets = Vec::with_capacity(rows.len());
+    for (external_id, platform, clob_token) in rows {
+        let plat_lower = platform.to_lowercase();
+
+        // Strip the "<platform>:" prefix to recover the raw upstream id
+        let raw_id = external_id
+            .strip_prefix(&format!("{}:", plat_lower))
+            .unwrap_or(&external_id)
+            .to_string();
+
+        let platform_token = match plat_lower.as_str() {
+            "polymarket" => match clob_token {
+                Some(tok) if tok.starts_with("0x") => tok,
+                _ => continue, // no CLOB token → can't query /trades
+            },
+            "kalshi" => raw_id,
+            _ => continue,
+        };
+
+        markets.push(TrackedMarket {
+            event_id: external_id, // canonical "<platform>:<id>"
+            platform: plat_lower,
+            platform_token,
+        });
+    }
+
+    Ok(markets)
 }
 
 // ── Loops ──────────────────────────────────────────────────────────
 
 pub async fn run_trade_ingestion_loop(pool: PgPool, client: Client) {
-    tracing::info!("🔄 Starting raw trade ingestion loop ({}s interval)", INGEST_INTERVAL_SECS);
+    tracing::info!(
+        "🔄 Starting raw trade ingestion loop ({}s interval)",
+        INGEST_INTERVAL_SECS
+    );
     let mut interval = time::interval(Duration::from_secs(INGEST_INTERVAL_SECS));
 
     loop {
@@ -381,22 +443,30 @@ pub async fn run_trade_ingestion_loop(pool: PgPool, client: Client) {
                 .ok()
                 .flatten();
 
-            let trades = match market.platform.to_lowercase().as_str() {
-                "polymarket" => fetch_polymarket_trades(&client, &market.platform_token, watermark).await,
-                "kalshi" => fetch_kalshi_trades(&client, &market.platform_token, watermark).await,
+            let trades = match market.platform.as_str() {
+                "polymarket" => {
+                    fetch_polymarket_trades(&client, &market.platform_token, watermark).await
+                }
+                "kalshi" => {
+                    fetch_kalshi_trades(&client, &market.platform_token, watermark).await
+                }
                 _ => continue,
             };
 
             match trades {
-                Ok(t) if !t.is_empty() => {
-                    match persist_trades(&pool, &t).await {
-                        Ok(n) => total_ingested += n,
-                        Err(e) => tracing::error!("Persist failed for {}: {}", market.event_id, e),
+                Ok(t) if !t.is_empty() => match persist_trades(&pool, &t).await {
+                    Ok(n) => total_ingested += n,
+                    Err(e) => {
+                        tracing::error!("Persist failed for {}: {}", market.event_id, e)
                     }
-                }
-                Err(_) => {} 
+                },
+                Err(e) => tracing::warn!(
+                    "Fetch failed for {} ({}): {}",
+                    market.event_id, market.platform, e
+                ),
                 _ => {}
             }
+
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
 
