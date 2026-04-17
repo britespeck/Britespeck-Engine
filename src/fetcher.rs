@@ -569,12 +569,16 @@ impl MarketFetcher {
                     .and_then(|v| v.as_str())
                     .and_then(parse_datetime);
 
-                let series = ticker.split('-').next().unwrap_or(ticker.as_str()).to_lowercase();
-                let market_url = Some(format!(
-                    "https://kalshi.com/markets/{}/{}",
-                    series, ticker.to_lowercase()
-                ));
-
+                    let series = ticker.split('-').next().unwrap_or(ticker.as_str()).to_lowercase();
+                    let market_ticker = best_market
+                        .get("ticker")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or(&ticker)
+                        .to_lowercase();
+                    let market_url = Some(format!(
+                        "https://kalshi.com/markets/{}/{}",
+                        series, market_ticker
+                    ));
                 let pe = PredictionEvent {
                     id: Uuid::new_v4(),
                     title,
