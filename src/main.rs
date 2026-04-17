@@ -16,7 +16,7 @@ use dotenv::dotenv;
 use reqwest::header::{HeaderMap, HeaderValue};
 use axum::{routing::{get, patch}, extract::{State, Query, Path}, Json, Router};
 use tower_http::cors::CorsLayer;
-use tower_http::compression::CompressionLayer; 
+use tower_http::compression::CompressionLayer;
 use serde::{Serialize, Deserialize};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -39,6 +39,7 @@ struct PredictionEvent {
     end_date: Option<chrono::DateTime<chrono::Utc>>,
     rsi_signal: Option<f64>,
     sentiment_score: Option<f64>,
+    clob_token_yes: Option<String>, // 🔑 NEW
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -61,7 +62,7 @@ struct PatchIconBody {
 
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score FROM public.prediction_events ORDER BY volume_24h DESC NULLS LAST LIMIT 50000"
+        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score, clob_token_yes FROM public.prediction_events ORDER BY volume_24h DESC NULLS LAST LIMIT 50000"
     )
     .fetch_all(&pool)
     .await
@@ -164,7 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/user_bots", get(get_user_bot).post(create_user_bot))
         .route("/user_bots/:id", patch(update_user_bot))
         .merge(endpoints::alpha_routes())
-        .layer(CompressionLayer::new()) 
+        .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
 
@@ -207,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut outcomes = Vec::new();
                 let mut urls = Vec::new();
                 let mut ends = Vec::new();
+                let mut clob_tokens: Vec<Option<String>> = Vec::new(); // 🔑 NEW
 
                 for e in &events {
                     ids.push(e.id);
@@ -221,13 +223,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     outcomes.push(serde_json::to_value(&e.outcomes).unwrap_or(serde_json::Value::Null));
                     urls.push(e.market_url.clone());
                     ends.push(e.end_date);
+                    clob_tokens.push(e.clob_token_yes.clone()); // 🔑 NEW
                 }
 
                 let result = sqlx::query(
                     r#"
-                    INSERT INTO public.prediction_events 
-                    (id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date)
-                    SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::float8[], $5::text[], $6::text[], $7::text[], $8::text[], $9::float8[], $10::timestamptz[], $11::jsonb[], $12::text[], $13::timestamptz[])
+                    INSERT INTO public.prediction_events
+                    (id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, clob_token_yes)
+                    SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::float8[], $5::text[], $6::text[], $7::text[], $8::text[], $9::float8[], $10::timestamptz[], $11::jsonb[], $12::text[], $13::timestamptz[], $14::text[])
                     ON CONFLICT (external_id) DO UPDATE SET
                         odds = EXCLUDED.odds,
                         volume_24h = EXCLUDED.volume_24h,
@@ -236,7 +239,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         icon_url = COALESCE(EXCLUDED.icon_url, public.prediction_events.icon_url),
                         status = EXCLUDED.status,
                         market_url = COALESCE(EXCLUDED.market_url, public.prediction_events.market_url),
-                        category = COALESCE(EXCLUDED.category, public.prediction_events.category)
+                        category = COALESCE(EXCLUDED.category, public.prediction_events.category),
+                        clob_token_yes = COALESCE(EXCLUDED.clob_token_yes, public.prediction_events.clob_token_yes)
                     "#
                 )
                 .bind(&ids)
@@ -252,6 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bind(&outcomes)
                 .bind(&urls)
                 .bind(&ends)
+                .bind(&clob_tokens) // 🔑 NEW
                 .execute(&sync_pool)
                 .await;
 
