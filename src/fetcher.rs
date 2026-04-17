@@ -1,10 +1,10 @@
-use serde_json::Value;
-use uuid::Uuid;
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use uuid::Uuid;
 
-use crate::models::{PredictionEvent, MarketOutcome};
+use crate::models::{MarketOutcome, PredictionEvent};
 
 pub struct MarketFetcher {
     kalshi_image_cache: Mutex<HashMap<String, Option<String>>>,
@@ -13,96 +13,203 @@ pub struct MarketFetcher {
 fn categorize_by_title(title: &str) -> Option<&'static str> {
     let t = title.to_lowercase();
 
-    // Gaming (before Sports so esports doesn't fall into Sports)
-    if t.contains("esports") || t.contains("e-sports") || t.contains("valorant")
-        || t.contains("league of legends") || t.contains("lcs") || t.contains("dota")
-        || t.contains("csgo") || t.contains("cs2") || t.contains("overwatch league")
-        || t.contains("call of duty league") || t.contains("cdl")
-        || t.contains("gaming") || t.contains("twitch") || t.contains("fortnite")
-        || t.contains("apex legends") || t.contains("rocket league")
+    if t.contains("esports")
+        || t.contains("e-sports")
+        || t.contains("valorant")
+        || t.contains("league of legends")
+        || t.contains("lcs")
+        || t.contains("dota")
+        || t.contains("csgo")
+        || t.contains("cs2")
+        || t.contains("overwatch league")
+        || t.contains("call of duty league")
+        || t.contains("cdl")
+        || t.contains("gaming")
+        || t.contains("twitch")
+        || t.contains("fortnite")
+        || t.contains("apex legends")
+        || t.contains("rocket league")
     {
         return Some("Gaming");
     }
 
-    if t.contains("nba") || t.contains("nfl") || t.contains("mlb") || t.contains("nhl")
-        || t.contains("premier league") || t.contains("uefa") || t.contains("soccer")
-        || t.contains("tennis") || t.contains("f1") || t.contains("nascar")
-        || t.contains("boxing") || t.contains("ufc") || t.contains("mma")
-        || t.contains("golf") || t.contains("pga") || t.contains("march madness")
-        || t.contains("ncaa") || t.contains("draft") || t.contains("super bowl")
-        || t.contains("world series") || t.contains("stanley cup")
-        || t.contains("championship") || t.contains("playoff")
-        || t.contains("wnba") || t.contains("mls")
+    if t.contains("nba")
+        || t.contains("nfl")
+        || t.contains("mlb")
+        || t.contains("nhl")
+        || t.contains("premier league")
+        || t.contains("uefa")
+        || t.contains("soccer")
+        || t.contains("tennis")
+        || t.contains("f1")
+        || t.contains("nascar")
+        || t.contains("boxing")
+        || t.contains("ufc")
+        || t.contains("mma")
+        || t.contains("golf")
+        || t.contains("pga")
+        || t.contains("march madness")
+        || t.contains("ncaa")
+        || t.contains("draft")
+        || t.contains("super bowl")
+        || t.contains("world series")
+        || t.contains("stanley cup")
+        || t.contains("championship")
+        || t.contains("playoff")
+        || t.contains("wnba")
+        || t.contains("mls")
     {
         return Some("Sports");
     }
 
-    // Global (before Politics so geopolitical doesn't fall into Politics)
-    if t.contains("war") || t.contains("ukraine") || t.contains("russia")
-        || t.contains("china") || t.contains("iran") || t.contains("israel")
-        || t.contains("gaza") || t.contains("ceasefire") || t.contains("sanctions")
-        || t.contains("united nations") || t.contains("diplomatic")
-        || t.contains("geopolit") || t.contains("territorial")
-        || t.contains("invasion") || t.contains("missile") || t.contains("nuclear")
-        || t.contains("north korea") || t.contains("taiwan")
-        || t.contains("middle east") || t.contains("houthi")
+    if t.contains("war")
+        || t.contains("ukraine")
+        || t.contains("russia")
+        || t.contains("china")
+        || t.contains("iran")
+        || t.contains("israel")
+        || t.contains("gaza")
+        || t.contains("ceasefire")
+        || t.contains("sanctions")
+        || t.contains("united nations")
+        || t.contains("diplomatic")
+        || t.contains("geopolit")
+        || t.contains("territorial")
+        || t.contains("invasion")
+        || t.contains("missile")
+        || t.contains("nuclear")
+        || t.contains("north korea")
+        || t.contains("taiwan")
+        || t.contains("middle east")
+        || t.contains("houthi")
     {
         return Some("Global");
     }
 
-    if t.contains("president") || t.contains("trump") || t.contains("biden")
-        || t.contains("congress") || t.contains("senate") || t.contains("election")
-        || t.contains("republican") || t.contains("democrat") || t.contains("governor")
-        || t.contains("mayor") || t.contains("supreme court") || t.contains("political")
-        || t.contains("legislation") || t.contains("impeach") || t.contains("veto")
-        || t.contains("executive order") || t.contains("cabinet")
-        || t.contains("parliament") || t.contains("nato")
+    if t.contains("president")
+        || t.contains("trump")
+        || t.contains("biden")
+        || t.contains("congress")
+        || t.contains("senate")
+        || t.contains("election")
+        || t.contains("republican")
+        || t.contains("democrat")
+        || t.contains("governor")
+        || t.contains("mayor")
+        || t.contains("supreme court")
+        || t.contains("political")
+        || t.contains("legislation")
+        || t.contains("impeach")
+        || t.contains("veto")
+        || t.contains("executive order")
+        || t.contains("cabinet")
+        || t.contains("parliament")
+        || t.contains("nato")
     {
         return Some("Politics");
     }
-    if t.contains("fed") || t.contains("interest rate") || t.contains("inflation")
-        || t.contains("gdp") || t.contains("recession") || t.contains("s&p")
-        || t.contains("stock") || t.contains("nasdaq") || t.contains("dow")
-        || t.contains("treasury") || t.contains("unemployment") || t.contains("tariff")
-        || t.contains("trade war") || t.contains("cpi") || t.contains("fomc")
-        || t.contains("economic") || t.contains("jobs report")
+
+    if t.contains("fed")
+        || t.contains("interest rate")
+        || t.contains("inflation")
+        || t.contains("gdp")
+        || t.contains("recession")
+        || t.contains("s&p")
+        || t.contains("stock")
+        || t.contains("nasdaq")
+        || t.contains("dow")
+        || t.contains("treasury")
+        || t.contains("unemployment")
+        || t.contains("tariff")
+        || t.contains("trade war")
+        || t.contains("cpi")
+        || t.contains("fomc")
+        || t.contains("economic")
+        || t.contains("jobs report")
     {
         return Some("Economics");
     }
-    if t.contains("bitcoin") || t.contains("ethereum") || t.contains("crypto")
-        || t.contains("btc") || t.contains("eth") || t.contains("solana")
-        || t.contains("defi") || t.contains("nft") || t.contains("blockchain")
-        || t.contains("stablecoin") || t.contains("altcoin")
+
+    if t.contains("bitcoin")
+        || t.contains("ethereum")
+        || t.contains("crypto")
+        || t.contains("btc")
+        || t.contains("eth")
+        || t.contains("solana")
+        || t.contains("defi")
+        || t.contains("nft")
+        || t.contains("blockchain")
+        || t.contains("stablecoin")
+        || t.contains("altcoin")
     {
         return Some("Crypto");
     }
-    if t.contains("ai") || t.contains("artificial intelligence") || t.contains("openai")
-        || t.contains("google") || t.contains("apple") || t.contains("tesla")
-        || t.contains("spacex") || t.contains("meta") || t.contains("microsoft")
-        || t.contains("amazon") || t.contains("nvidia") || t.contains("robot")
-        || t.contains("quantum") || t.contains("chip") || t.contains("semiconductor")
-        || t.contains("llm") || t.contains("gpt")
+
+    if t.contains("ai")
+        || t.contains("artificial intelligence")
+        || t.contains("openai")
+        || t.contains("google")
+        || t.contains("apple")
+        || t.contains("tesla")
+        || t.contains("spacex")
+        || t.contains("meta")
+        || t.contains("microsoft")
+        || t.contains("amazon")
+        || t.contains("nvidia")
+        || t.contains("robot")
+        || t.contains("quantum")
+        || t.contains("chip")
+        || t.contains("semiconductor")
+        || t.contains("llm")
+        || t.contains("gpt")
     {
         return Some("Tech");
     }
-    if t.contains("hurricane") || t.contains("earthquake") || t.contains("temperature")
-        || t.contains("weather") || t.contains("climate") || t.contains("wildfire")
-        || t.contains("flood") || t.contains("tornado") || t.contains("storm")
-        || t.contains("drought") || t.contains("el nino") || t.contains("la nina")
+
+    if t.contains("hurricane")
+        || t.contains("earthquake")
+        || t.contains("temperature")
+        || t.contains("weather")
+        || t.contains("climate")
+        || t.contains("wildfire")
+        || t.contains("flood")
+        || t.contains("tornado")
+        || t.contains("storm")
+        || t.contains("drought")
+        || t.contains("el nino")
+        || t.contains("la nina")
     {
         return Some("Weather");
     }
-    if t.contains("oscar") || t.contains("grammy") || t.contains("emmy")
-        || t.contains("movie") || t.contains("film") || t.contains("album")
-        || t.contains("tiktok") || t.contains("twitter") || t.contains("viral")
-        || t.contains("celebrity") || t.contains("netflix") || t.contains("spotify")
-        || t.contains("youtube") || t.contains("streaming") || t.contains("box office")
-        || t.contains("met gala") || t.contains("reality tv") || t.contains("influencer")
-        || t.contains("measles") || t.contains("pandemic") || t.contains("vaccine")
-        || t.contains("health") || t.contains("fda") || t.contains("cdc")
+
+    if t.contains("oscar")
+        || t.contains("grammy")
+        || t.contains("emmy")
+        || t.contains("movie")
+        || t.contains("film")
+        || t.contains("album")
+        || t.contains("tiktok")
+        || t.contains("twitter")
+        || t.contains("viral")
+        || t.contains("celebrity")
+        || t.contains("netflix")
+        || t.contains("spotify")
+        || t.contains("youtube")
+        || t.contains("streaming")
+        || t.contains("box office")
+        || t.contains("met gala")
+        || t.contains("reality tv")
+        || t.contains("influencer")
+        || t.contains("measles")
+        || t.contains("pandemic")
+        || t.contains("vaccine")
+        || t.contains("health")
+        || t.contains("fda")
+        || t.contains("cdc")
     {
         return Some("Social");
     }
+
     None
 }
 
@@ -117,46 +224,58 @@ fn extract_image(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
+fn value_as_f64(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_i64().map(|n| n as f64))
+        .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+}
+
 fn extract_kalshi_price(market: &Value) -> f64 {
-    let candidates = [
-        "last_price_dollars", "yes_bid_dollars", "yes_ask_dollars", "yes_price",
-    ];
-    for key in &candidates {
-        if let Some(v) = market.get(key) {
-            if let Some(n) = v.as_f64() {
-                if n > 0.0 { return n; }
-            }
-            // FIXED: Handle "0.5600" strings
-            if let Some(s) = v.as_str() {
-                if let Ok(n) = s.parse::<f64>() {
-                    if n > 0.0 { return n; }
-                }
+    for key in &[
+        "last_price_dollars",
+        "yes_bid_dollars",
+        "yes_ask_dollars",
+        "yes_price_dollars",
+    ] {
+        if let Some(v) = market.get(key).and_then(value_as_f64) {
+            if v > 0.0 {
+                return v;
             }
         }
     }
+
+    for key in &["yes_price", "last_price", "yes_bid", "yes_ask"] {
+        if let Some(v) = market.get(key).and_then(value_as_f64) {
+            if v > 0.0 {
+                return if v > 1.0 { v / 100.0 } else { v };
+            }
+        }
+    }
+
     0.5
 }
 
 fn extract_market_volume(market: &Value) -> f64 {
-    let dollar_candidates = ["dollar_volume", "volume_24h_fp", "volume_fp"];
-    for key in &dollar_candidates {
-        if let Some(v) = market.get(key) {
-            // FIXED: Handle "10.00" strings
-            if let Some(s) = v.as_str() {
-                if let Ok(n) = s.parse::<f64>() { if n > 0.0 { return n; } }
+    for key in &[
+        "dollar_volume",
+        "dollar_volume_24h",
+        "volume_24h_fp",
+        "volume_fp",
+    ] {
+        if let Some(v) = market.get(key).and_then(value_as_f64) {
+            if v > 0.0 {
+                return v;
             }
-            if let Some(n) = v.as_f64() { if n > 0.0 { return n; } }
-            if let Some(n) = v.as_i64() { if n > 0 { return n as f64; } }
         }
     }
 
-    let raw_vol_candidates = ["volume_24h", "volume24h", "volume", "open_interest"];
-    let mut raw_vol: f64 = 0.0;
-    for key in &raw_vol_candidates {
-        if let Some(v) = market.get(key) {
-            if let Some(n) = v.as_f64() { if n > 0.0 { raw_vol = n; break; } }
-            if let Some(n) = v.as_i64() { if n > 0 { raw_vol = n as f64; break; } }
-            if let Some(s) = v.as_str() { if let Ok(n) = s.parse::<f64>() { if n > 0.0 { raw_vol = n; break; } } }
+    let mut raw_vol = 0.0;
+    for key in &["volume_24h", "volume24h", "volume"] {
+        if let Some(v) = market.get(key).and_then(value_as_f64) {
+            if v > 0.0 {
+                raw_vol = v;
+                break;
+            }
         }
     }
 
@@ -169,16 +288,40 @@ fn extract_market_volume(market: &Value) -> f64 {
 }
 
 fn extract_poly_market_volume(market: &Value) -> f64 {
-    let candidates = ["volume24hr", "volume", "volumeNum"];
-    for key in &candidates {
-        if let Some(v) = market.get(key) {
-            if let Some(n) = v.as_f64() { return n; }
-            if let Some(s) = v.as_str() {
-                if let Ok(n) = s.parse::<f64>() { return n; }
+    for key in &["volume24hr", "volume24h", "volume", "volumeNum"] {
+        if let Some(v) = market.get(key).and_then(value_as_f64) {
+            if v > 0.0 {
+                return v;
             }
         }
     }
     0.0
+}
+
+fn extract_poly_price(market: &Value) -> f64 {
+    if let Some(v) = market.get("outcomePrices") {
+        if let Some(arr) = v.as_array() {
+            if let Some(first) = arr.first().and_then(value_as_f64) {
+                return if first > 1.0 { first / 100.0 } else { first };
+            }
+        }
+
+        if let Some(s) = v.as_str() {
+            if let Ok(prices) = serde_json::from_str::<Vec<String>>(s) {
+                if let Some(first) = prices.first().and_then(|p| p.parse::<f64>().ok()) {
+                    return if first > 1.0 { first / 100.0 } else { first };
+                }
+            }
+        }
+    }
+
+    for key in &["yesPrice", "price"] {
+        if let Some(v) = market.get(key).and_then(value_as_f64) {
+            return if v > 1.0 { v / 100.0 } else { v };
+        }
+    }
+
+    0.5
 }
 
 fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
@@ -197,43 +340,45 @@ impl MarketFetcher {
         event_ticker: &str,
     ) -> Option<String> {
         let event_url = format!(
-            "https://kalshi.com{}",
+            "https://api.elections.kalshi.com/trade-api/v2/events/{}",
             event_ticker
         );
-        match client.get(&event_url).send().await {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        let event_obj = json.get("event").unwrap_or(&json);
-                        let img_keys = [
-                            "image_url",
-                            "featured_image_url",
-                            "thumbnail_url",
-                            "category_image_url",
-                            "og_image_url",
-                        ];
-                        for key in &img_keys {
-                            if let Some(url) = event_obj.get(key)
+
+        if let Ok(resp) = client.get(&event_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<Value>().await {
+                    let event_obj = json.get("event").unwrap_or(&json);
+                    let img_keys = [
+                        "image_url",
+                        "featured_image_url",
+                        "thumbnail_url",
+                        "category_image_url",
+                        "og_image_url",
+                    ];
+
+                    for key in &img_keys {
+                        if let Some(url) = event_obj
+                            .get(key)
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty() && s.starts_with("http"))
+                        {
+                            return Some(url.to_string());
+                        }
+                    }
+
+                    if let Some(markets) = event_obj.get("markets").and_then(|m| m.as_array()) {
+                        for m in markets {
+                            if let Some(url) = m
+                                .get("image_url")
                                 .and_then(|v| v.as_str())
                                 .filter(|s| !s.is_empty() && s.starts_with("http"))
                             {
                                 return Some(url.to_string());
                             }
                         }
-                        if let Some(markets) = event_obj.get("markets").and_then(|m| m.as_array()) {
-                            for m in markets {
-                                if let Some(url) = m.get("image_url")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty() && s.starts_with("http"))
-                                {
-                                    return Some(url.to_string());
-                                }
-                            }
-                        }
                     }
                 }
             }
-            Err(_) => {}
         }
 
         let series_ticker = event_ticker
@@ -243,27 +388,27 @@ impl MarketFetcher {
             .to_lowercase();
 
         let series_url = format!(
-            "https://kalshi.com{}",
+            "https://api.elections.kalshi.com/trade-api/v2/series/{}",
             series_ticker
         );
-        match client.get(&series_url).send().await {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    if let Ok(json) = resp.json::<Value>().await {
-                        let series_obj = json.get("series").unwrap_or(&json);
-                        let img_keys = ["image_url", "category_image_url"];
-                        for key in &img_keys {
-                            if let Some(url) = series_obj.get(key)
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty() && s.starts_with("http"))
-                            {
-                                return Some(url.to_string());
-                            }
+
+        if let Ok(resp) = client.get(&series_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<Value>().await {
+                    let series_obj = json.get("series").unwrap_or(&json);
+                    let img_keys = ["image_url", "category_image_url"];
+
+                    for key in &img_keys {
+                        if let Some(url) = series_obj
+                            .get(key)
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty() && s.starts_with("http"))
+                        {
+                            return Some(url.to_string());
                         }
                     }
                 }
             }
-            Err(_) => {}
         }
 
         None
@@ -280,17 +425,21 @@ impl MarketFetcher {
                 return Some(img.clone());
             }
         }
+
         {
             let cache = self.kalshi_image_cache.lock().unwrap();
             if let Some(cached) = cache.get(event_ticker) {
                 return cached.clone();
             }
         }
+
         let result = Self::fetch_kalshi_series_image(client, event_ticker).await;
+
         {
             let mut cache = self.kalshi_image_cache.lock().unwrap();
             cache.insert(event_ticker.to_string(), result.clone());
         }
+
         result
     }
 
@@ -301,7 +450,7 @@ impl MarketFetcher {
     ) -> Vec<PredictionEvent> {
         let mut unified: Vec<PredictionEvent> = Vec::new();
 
-        // ─── KALSHI ───
+        // ─── KALSHI ───────────────────────────────────────────────────────────────
         let mut kalshi_cursor: Option<String> = None;
         let kalshi_limit = 200;
         let mut kalshi_retries = 0;
@@ -309,11 +458,12 @@ impl MarketFetcher {
 
         loop {
             let mut url = format!(
-                "https://kalshi.com{}&status=open&with_nested_markets=true",
+                "https://api.elections.kalshi.com/trade-api/v2/events?limit={}&status=open&with_nested_markets=true",
                 kalshi_limit
             );
+
             if let Some(ref cursor) = kalshi_cursor {
-                url.push_str(&format!("&cursor={}", cursor));
+                url.push_str(&format!("&cursor={}", urlencoding::encode(cursor)));
             }
 
             match kalshi_client.get(&url).send().await {
@@ -323,13 +473,26 @@ impl MarketFetcher {
                     if status == 429 || status.is_server_error() {
                         kalshi_retries += 1;
                         if kalshi_retries > max_kalshi_retries {
-                            println!("⚠️ Kalshi rate-limited after {} retries, moving on", max_kalshi_retries);
+                            println!(
+                                "⚠️ Kalshi rate-limited after {} retries, moving on",
+                                max_kalshi_retries
+                            );
                             break;
                         }
+
                         let wait = 2u64.pow(kalshi_retries);
-                        println!("⏳ Kalshi {} — backing off {}s (attempt {}/{})", status, wait, kalshi_retries, max_kalshi_retries);
+                        println!(
+                            "⏳ Kalshi {} — backing off {}s (attempt {}/{})",
+                            status, wait, kalshi_retries, max_kalshi_retries
+                        );
                         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                         continue;
+                    }
+
+                    if !status.is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        println!("❌ Kalshi HTTP {}: {}", status, body);
+                        break;
                     }
 
                     let body = match resp.text().await {
@@ -343,11 +506,18 @@ impl MarketFetcher {
                     if body.trim().is_empty() {
                         kalshi_retries += 1;
                         if kalshi_retries > max_kalshi_retries {
-                            println!("⚠️ Kalshi returned empty body after {} retries", max_kalshi_retries);
+                            println!(
+                                "⚠️ Kalshi returned empty body after {} retries",
+                                max_kalshi_retries
+                            );
                             break;
                         }
+
                         let wait = 2u64.pow(kalshi_retries);
-                        println!("⏳ Kalshi empty response — retrying in {}s (attempt {}/{})", wait, kalshi_retries, max_kalshi_retries);
+                        println!(
+                            "⏳ Kalshi empty response — retrying in {}s (attempt {}/{})",
+                            wait, kalshi_retries, max_kalshi_retries
+                        );
                         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                         continue;
                     }
@@ -357,7 +527,9 @@ impl MarketFetcher {
                         Err(e) => {
                             println!("❌ Kalshi JSON parse error: {} (body len={})", e, body.len());
                             kalshi_retries += 1;
-                            if kalshi_retries > max_kalshi_retries { break; }
+                            if kalshi_retries > max_kalshi_retries {
+                                break;
+                            }
                             let wait = 2u64.pow(kalshi_retries);
                             tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                             continue;
@@ -372,7 +544,9 @@ impl MarketFetcher {
                         .cloned()
                         .unwrap_or_default();
 
-                    if events.is_empty() { break; }
+                    if events.is_empty() {
+                        break;
+                    }
 
                     for event in &events {
                         let ticker = event
@@ -380,11 +554,17 @@ impl MarketFetcher {
                             .and_then(|t| t.as_str())
                             .unwrap_or("")
                             .to_string();
+
+                        if ticker.is_empty() {
+                            continue;
+                        }
+
                         let title = event
                             .get("title")
                             .and_then(|t| t.as_str())
                             .unwrap_or("Unknown")
                             .to_string();
+
                         let category_raw = event
                             .get("category")
                             .and_then(|c| c.as_str())
@@ -392,9 +572,18 @@ impl MarketFetcher {
 
                         let event_image = extract_image(
                             event,
-                            &["image_url", "thumbnail_url", "series_image_url", "category_image_url", "og_image_url"],
+                            &[
+                                "image_url",
+                                "thumbnail_url",
+                                "series_image_url",
+                                "category_image_url",
+                                "og_image_url",
+                            ],
                         );
-                        let icon = self.get_kalshi_image(kalshi_client, &ticker, &event_image).await;
+
+                        let icon = self
+                            .get_kalshi_image(kalshi_client, &ticker, &event_image)
+                            .await;
 
                         let nested_markets = event
                             .get("markets")
@@ -412,18 +601,19 @@ impl MarketFetcher {
                             })
                             .collect();
 
-                        let total_volume: f64 = active_markets.iter().map(|m| extract_market_volume(m)).sum();
+                        if active_markets.is_empty() {
+                            continue;
+                        }
 
-                        if active_markets.is_empty() { continue; }
+                        let total_volume: f64 =
+                            active_markets.iter().map(extract_market_volume).sum();
 
                         let best_market = active_markets
                             .iter()
                             .min_by(|a, b| {
-                                let pa = extract_kalshi_price(a);
-                                let pb = extract_kalshi_price(b);
-                                let da = (pa - 0.5_f64).abs();
-                                let db = (pb - 0.5_f64).abs();
-                                da.partial_cmp(&db).unwrap()
+                                let da = (extract_kalshi_price(a) - 0.5_f64).abs();
+                                let db = (extract_kalshi_price(b) - 0.5_f64).abs();
+                                da.total_cmp(&db)
                             })
                             .unwrap();
 
@@ -440,9 +630,15 @@ impl MarketFetcher {
                                     .and_then(|t| t.as_str())
                                     .unwrap_or("Yes")
                                     .to_string();
+
                                 let price = extract_kalshi_price(m);
                                 let volume = extract_market_volume(m);
-                                MarketOutcome { name, price, volume }
+
+                                MarketOutcome {
+                                    name,
+                                    price,
+                                    volume,
+                                }
                             })
                             .collect();
 
@@ -458,28 +654,33 @@ impl MarketFetcher {
 
                         let category = categorize_by_title(&title)
                             .map(|s| s.to_string())
-                            .unwrap_or_else(|| {
-                                match category_raw.to_lowercase().as_str() {
-                                    "politics" => "Politics".to_string(),
-                                    "economics" | "finance" => "Economics".to_string(),
-                                    "tech" | "science" | "technology" => "Tech".to_string(),
-                                    "sports" => "Sports".to_string(),
-                                    "crypto" => "Crypto".to_string(),
-                                    "climate" | "weather" => "Weather".to_string(),
-                                    "gaming" | "esports" => "Gaming".to_string(),
-                                    _ => "Social".to_string(),
-                                }
+                            .unwrap_or_else(|| match category_raw.to_lowercase().as_str() {
+                                "politics" => "Politics".to_string(),
+                                "economics" | "finance" => "Economics".to_string(),
+                                "tech" | "science" | "technology" => "Tech".to_string(),
+                                "sports" => "Sports".to_string(),
+                                "crypto" => "Crypto".to_string(),
+                                "climate" | "weather" => "Weather".to_string(),
+                                "gaming" | "esports" => "Gaming".to_string(),
+                                _ => "Social".to_string(),
                             });
 
                         let end_date: Option<DateTime<Utc>> = event
                             .get("close_time")
                             .or_else(|| event.get("expected_expiration_time"))
                             .and_then(|v| v.as_str())
-                            .and_then(|s| parse_datetime(s));
+                            .and_then(parse_datetime);
+
+                        let series = ticker
+                            .split('-')
+                            .next()
+                            .unwrap_or(ticker.as_str())
+                            .to_lowercase();
 
                         let market_url = Some(format!(
-                            "https://kalshi.com{}",
-                            ticker.split('-').next().unwrap_or(&ticker).to_lowercase()
+                            "https://kalshi.com/markets/{}/{}",
+                            series,
+                            ticker.to_lowercase()
                         ));
 
                         unified.push(PredictionEvent {
@@ -505,14 +706,20 @@ impl MarketFetcher {
                         .map(|s| s.to_string())
                         .filter(|s| !s.is_empty());
 
-                    if kalshi_cursor.is_none() { break; }
-
                     println!("📡 Kalshi page fetched: {} events so far...", unified.len());
+
+                    if kalshi_cursor.is_none() {
+                        break;
+                    }
                 }
                 Err(e) => {
                     println!("❌ Kalshi connection failed: {}", e);
                     kalshi_retries += 1;
-                    if kalshi_retries > max_kalshi_retries { break; }
+
+                    if kalshi_retries > max_kalshi_retries {
+                        break;
+                    }
+
                     let wait = 2u64.pow(kalshi_retries);
                     println!("⏳ Retrying Kalshi in {}s...", wait);
                     tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
@@ -524,30 +731,42 @@ impl MarketFetcher {
         let kalshi_count = unified.len();
         println!("✅ Kalshi events collected: {}", kalshi_count);
 
-        // ─── POLYMARKET ───
+        // ─── POLYMARKET ───────────────────────────────────────────────────────────
         let poly_limit = 100;
         let mut poly_offset = 0;
         let poly_max = 2000;
         let mut poly_total = 0;
 
         loop {
-            if poly_offset >= poly_max { break; }
+            if poly_offset >= poly_max {
+                break;
+            }
 
             let url = format!(
-                "https://polymarket.com{}&offset={}&order=volume24hr&ascending=false",
+                "https://gamma-api.polymarket.com/events?limit={}&offset={}&order=volume24hr&ascending=false&closed=false&active=true",
                 poly_limit, poly_offset
             );
 
             match poly_client.get(&url).send().await {
                 Ok(resp) => {
+                    let status = resp.status();
+
+                    if !status.is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        println!("❌ Polymarket HTTP {}: {}", status, body);
+                        break;
+                    }
+
                     match resp.json::<Value>().await {
                         Ok(json) => {
                             let events = match json.as_array() {
                                 Some(arr) => arr.clone(),
-                                None => { break; }
+                                None => break,
                             };
 
-                            if events.is_empty() { break; }
+                            if events.is_empty() {
+                                break;
+                            }
 
                             for event in &events {
                                 let title = event
@@ -555,11 +774,18 @@ impl MarketFetcher {
                                     .and_then(|t| t.as_str())
                                     .unwrap_or("Unknown")
                                     .to_string();
+
                                 let ext_id = event
                                     .get("id")
-                                    .and_then(|i| i.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
+                                    .map(|v| {
+                                        if let Some(s) = v.as_str() {
+                                            s.to_string()
+                                        } else {
+                                            v.to_string().trim_matches('"').to_string()
+                                        }
+                                    })
+                                    .unwrap_or_default();
+
                                 let icon = event
                                     .get("image")
                                     .or_else(|| event.get("icon"))
@@ -573,24 +799,21 @@ impl MarketFetcher {
 
                                 let market_url = slug
                                     .as_ref()
-                                    .map(|s| format!("https://polymarket.com{}", s))
-                                    .or_else(|| Some(format!(
-                                        "https://polymarket.com{}",
-                                        urlencoding::encode(&title)
-                                    )));
+                                    .map(|s| format!("https://polymarket.com/event/{}", s))
+                                    .or_else(|| {
+                                        Some(format!(
+                                            "https://polymarket.com/markets?query={}",
+                                            urlencoding::encode(&title)
+                                        ))
+                                    });
 
                                 let end_date: Option<DateTime<Utc>> = event
                                     .get("endDate")
                                     .or_else(|| event.get("end_date"))
                                     .and_then(|v| v.as_str())
-                                    .and_then(|s| parse_datetime(s));
+                                    .and_then(parse_datetime);
 
-                                let event_volume: f64 = event
-                                    .get("volume")
-                                    .and_then(|v| {
-                                        v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
-                                    })
-                                    .unwrap_or(0.0);
+                                let event_volume = extract_poly_market_volume(event);
 
                                 let markets = event
                                     .get("markets")
@@ -601,35 +824,40 @@ impl MarketFetcher {
                                 let active_markets: Vec<&Value> = markets
                                     .iter()
                                     .filter(|m| {
-                                        let active = m.get("active").and_then(|a| a.as_bool()).unwrap_or(true);
-                                        let closed = m.get("closed").and_then(|c| c.as_bool()).unwrap_or(false);
+                                        let active = m
+                                            .get("active")
+                                            .and_then(|a| a.as_bool())
+                                            .unwrap_or(true);
+                                        let closed = m
+                                            .get("closed")
+                                            .and_then(|c| c.as_bool())
+                                            .unwrap_or(false);
                                         active && !closed
                                     })
                                     .collect();
 
-                                if active_markets.is_empty() { continue; }
+                                if active_markets.is_empty() {
+                                    continue;
+                                }
 
                                 let total_vol = if event_volume > 0.0 {
                                     event_volume
                                 } else {
-                                    active_markets.iter().map(|m| extract_poly_market_volume(m)).sum()
+                                    active_markets
+                                        .iter()
+                                        .map(|m| extract_poly_market_volume(m))
+                                        .sum()
                                 };
 
                                 let best_market = active_markets
                                     .iter()
                                     .max_by(|a, b| {
-                                        let va = extract_poly_market_volume(a);
-                                        let vb = extract_poly_market_volume(b);
-                                        va.partial_cmp(&vb).unwrap()
+                                        extract_poly_market_volume(a)
+                                            .total_cmp(&extract_poly_market_volume(b))
                                     })
                                     .unwrap();
 
-                                let odds = best_market
-                                    .get("outcomePrices")
-                                    .and_then(|op| op.as_str())
-                                    .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                                    .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
-                                    .unwrap_or(0.5);
+                                let odds = extract_poly_price(best_market);
 
                                 let outcomes: Vec<MarketOutcome> = active_markets
                                     .iter()
@@ -641,14 +869,15 @@ impl MarketFetcher {
                                             .and_then(|t| t.as_str())
                                             .unwrap_or("Yes")
                                             .to_string();
-                                        let price = m
-                                            .get("outcomePrices")
-                                            .and_then(|op| op.as_str())
-                                            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                                            .and_then(|prices| prices.first().and_then(|p| p.parse::<f64>().ok()))
-                                            .unwrap_or(0.5);
+
+                                        let price = extract_poly_price(m);
                                         let volume = extract_poly_market_volume(m);
-                                        MarketOutcome { name, price, volume }
+
+                                        MarketOutcome {
+                                            name,
+                                            price,
+                                            volume,
+                                        }
                                     })
                                     .collect();
 
@@ -670,6 +899,7 @@ impl MarketFetcher {
                                             .and_then(|t| t.as_array())
                                             .cloned()
                                             .unwrap_or_default();
+
                                         let tag_str: Vec<String> = tags
                                             .iter()
                                             .filter_map(|t| {
@@ -679,22 +909,38 @@ impl MarketFetcher {
                                                     .map(|s| s.to_lowercase())
                                             })
                                             .collect();
+
                                         let all_tags = tag_str.join(" ");
-                                        if all_tags.contains("esport") || all_tags.contains("gaming") {
+
+                                        if all_tags.contains("esport") || all_tags.contains("gaming")
+                                        {
                                             "Gaming".to_string()
-                                        } else if all_tags.contains("politic") || all_tags.contains("election") {
+                                        } else if all_tags.contains("politic")
+                                            || all_tags.contains("election")
+                                        {
                                             "Politics".to_string()
-                                        } else if all_tags.contains("crypto") || all_tags.contains("bitcoin") {
+                                        } else if all_tags.contains("crypto")
+                                            || all_tags.contains("bitcoin")
+                                        {
                                             "Crypto".to_string()
                                         } else if all_tags.contains("sport") {
                                             "Sports".to_string()
-                                        } else if all_tags.contains("tech") || all_tags.contains("ai") {
+                                        } else if all_tags.contains("tech")
+                                            || all_tags.contains("ai")
+                                        {
                                             "Tech".to_string()
-                                        } else if all_tags.contains("econ") || all_tags.contains("financ") {
+                                        } else if all_tags.contains("econ")
+                                            || all_tags.contains("financ")
+                                        {
                                             "Economics".to_string()
-                                        } else if all_tags.contains("climate") || all_tags.contains("weather") {
+                                        } else if all_tags.contains("climate")
+                                            || all_tags.contains("weather")
+                                        {
                                             "Weather".to_string()
-                                        } else if all_tags.contains("geopolit") || all_tags.contains("war") || all_tags.contains("global") {
+                                        } else if all_tags.contains("geopolit")
+                                            || all_tags.contains("war")
+                                            || all_tags.contains("global")
+                                        {
                                             "Global".to_string()
                                         } else {
                                             "Social".to_string()
@@ -720,7 +966,9 @@ impl MarketFetcher {
                                 poly_total += 1;
                             }
 
-                            if events.len() < poly_limit as usize { break; }
+                            if events.len() < poly_limit as usize {
+                                break;
+                            }
 
                             poly_offset += poly_limit;
                             println!("📡 Polymarket page fetched: {} events so far...", poly_total);
