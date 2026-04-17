@@ -225,23 +225,32 @@ fn extract_kalshi_price(market: &Value) -> f64 {
     0.5
 }
 
+// 🔧 Prioritize 24h rolling volume over lifetime (live, not stale)
 fn extract_kalshi_market_volume(market: &Value) -> f64 {
-    for key in &["dollar_volume_24h", "dollar_volume"] {
-        if let Some(v) = market.get(key).and_then(value_as_f64) {
-            if v > 0.0 { return v; }
-        }
-    }
     let price = extract_kalshi_price(market);
-    for key in &["volume_24h_fp", "volume_fp"] {
+
+    // 1. Rolling 24h contract volume (in cents) → multiply by price for $ value
+    for key in &["volume_24h_fp", "volume_24h", "volume24h"] {
         if let Some(v) = market.get(key).and_then(value_as_f64) {
             if v > 0.0 { return v * price; }
         }
     }
-    for key in &["volume_24h", "volume24h", "volume"] {
+
+    // 2. Rolling 24h dollar volume (already in dollars)
+    if let Some(v) = market.get("dollar_volume_24h").and_then(value_as_f64) {
+        if v > 0.0 { return v; }
+    }
+
+    // 3. Lifetime fallbacks (stale-looking but better than zero)
+    if let Some(v) = market.get("dollar_volume").and_then(value_as_f64) {
+        if v > 0.0 { return v; }
+    }
+    for key in &["volume_fp", "volume"] {
         if let Some(v) = market.get(key).and_then(value_as_f64) {
             if v > 0.0 { return v * price; }
         }
     }
+
     0.0
 }
 
@@ -430,8 +439,8 @@ impl MarketFetcher {
 
         loop {
             kalshi_pages += 1;
-            if kalshi_pages > 50 {
-                println!("⚠️  Kalshi page cap reached (50)");
+            if kalshi_pages > 70 {
+                println!("⚠️  Kalshi page cap reached (70)");
                 break;
             }
 
@@ -569,16 +578,14 @@ impl MarketFetcher {
                     .and_then(|v| v.as_str())
                     .and_then(parse_datetime);
 
-                    let series = ticker.split('-').next().unwrap_or(ticker.as_str()).to_lowercase();
-                    let market_ticker = best_market
-                        .get("ticker")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or(&ticker)
-                        .to_lowercase();
-                    let market_url = Some(format!(
-                        "https://kalshi.com/markets/{}/{}",
-                        series, market_ticker
-                    ));
+                // 🔧 FIXED: Use event_ticker (not market_ticker) — Kalshi web URLs only resolve at event level
+                let series = ticker.split('-').next().unwrap_or(ticker.as_str()).to_lowercase();
+                let market_url = Some(format!(
+                    "https://kalshi.com/markets/{}/{}",
+                    series,
+                    ticker.to_lowercase()
+                ));
+
                 let pe = PredictionEvent {
                     id: Uuid::new_v4(),
                     title,
@@ -614,7 +621,7 @@ impl MarketFetcher {
         let mut poly_map: HashMap<String, PredictionEvent> = HashMap::new();
         let poly_limit: u32 = 100;
         let mut poly_offset: u32 = 0;
-        let poly_max: u32 = 5000;
+        let poly_max: u32 = 15000;
 
         loop {
             if poly_offset >= poly_max {
