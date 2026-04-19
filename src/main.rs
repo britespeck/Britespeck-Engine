@@ -39,7 +39,7 @@ struct PredictionEvent {
     end_date: Option<chrono::DateTime<chrono::Utc>>,
     rsi_signal: Option<f64>,
     sentiment_score: Option<f64>,
-    clob_token_yes: Option<String>, // 🔑 NEW
+    clob_token_yes: Option<String>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -208,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut outcomes = Vec::new();
                 let mut urls = Vec::new();
                 let mut ends = Vec::new();
-                let mut clob_tokens: Vec<Option<String>> = Vec::new(); // 🔑 NEW
+                let mut clob_tokens: Vec<Option<String>> = Vec::new();
 
                 for e in &events {
                     ids.push(e.id);
@@ -223,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     outcomes.push(serde_json::to_value(&e.outcomes).unwrap_or(serde_json::Value::Null));
                     urls.push(e.market_url.clone());
                     ends.push(e.end_date);
-                    clob_tokens.push(e.clob_token_yes.clone()); // 🔑 NEW
+                    clob_tokens.push(e.clob_token_yes.clone());
                 }
 
                 let result = sqlx::query(
@@ -256,7 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bind(&outcomes)
                 .bind(&urls)
                 .bind(&ends)
-                .bind(&clob_tokens) // 🔑 NEW
+                .bind(&clob_tokens)
                 .execute(&sync_pool)
                 .await;
 

@@ -1,7 +1,4 @@
 //! Alpha signal detection: hidden wicks, volume spikes, and liquidity gaps.
-//!
-//! Analyzes raw trade data to find patterns invisible on bucketed platform charts.
-//! Signals are stored in `alpha_signals` and exposed via REST API.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -27,8 +24,8 @@ pub struct WickMetadata {
     pub wick_range: f64,
     pub bucketed_high: f64,
     pub bucketed_low: f64,
-    pub hidden_cents: f64, // How many cents the platform UI hid
-    pub direction: String, // "up_wick" or "down_wick"
+    pub hidden_cents: f64,
+    pub direction: String,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub trade_count: usize,
@@ -38,8 +35,8 @@ pub struct WickMetadata {
 pub struct VolumeSpikeMetadata {
     pub window_volume: f64,
     pub avg_volume: f64,
-    pub spike_ratio: f64, // window_volume / avg_volume
-    pub dominant_side: Option<String>, // "buy" or "sell"
+    pub spike_ratio: f64,
+    pub dominant_side: Option<String>,
     pub buy_volume: f64,
     pub sell_volume: f64,
     pub window_start: DateTime<Utc>,
@@ -57,32 +54,15 @@ pub struct LiquidityGapMetadata {
 
 // ── Constants ──────────────────────────────────────────────────────
 
-/// Minimum wick size (in price units 0-1) to flag as a hidden wick.
-/// 5 cents = 0.05 on the 0-1 scale.
-const WICK_THRESHOLD: f64 = 0.05;
-
-/// Volume spike threshold: window volume must be >2x the rolling average.
+const WICK_THRESHOLD: f64 = 0.05;        // 5 cents
 const VOLUME_SPIKE_RATIO: f64 = 2.0;
-
-/// Liquidity gap threshold: price jump between consecutive trades (cents).
 const LIQUIDITY_GAP_THRESHOLD: f64 = 0.03; // 3 cents
-
-/// Rolling window for volume spike detection (minutes).
 const VOLUME_WINDOW_MINS: i64 = 15;
-
-/// Rolling average lookback for volume baseline (minutes).
 const VOLUME_BASELINE_MINS: i64 = 60;
-
-/// Bucketing window to simulate what platforms show (minutes).
 const BUCKET_WINDOW_MINS: i64 = 5;
 
 // ── Wick Detection ─────────────────────────────────────────────────
 
-/// Detect hidden price wicks by comparing raw trade min/max against
-/// what a 5-minute bucketed chart would show.
-///
-/// Platform charts bucket into ~5min candles using first/last price,
-/// which hides intra-bucket extremes. We find those hidden extremes.
 pub async fn detect_wicks(
     pool: &PgPool,
     event_id: &str,
@@ -91,7 +71,6 @@ pub async fn detect_wicks(
     let since = Utc::now() - Duration::hours(lookback_hours);
     let mut signals = Vec::new();
 
-    // Fetch all raw trades for this event in the lookback window
     let trades: Vec<(f64, f64, DateTime<Utc>)> = sqlx::query_as(
         "SELECT price, size, trade_timestamp FROM raw_trades
          WHERE event_id = $1 AND trade_timestamp >= $2
@@ -103,17 +82,15 @@ pub async fn detect_wicks(
     .await?;
 
     if trades.len() < 10 {
-        return Ok(signals); // Not enough data
+        return Ok(signals);
     }
 
-    // Group trades into bucket windows
     let bucket_duration = Duration::minutes(BUCKET_WINDOW_MINS);
     let mut bucket_start = trades[0].2;
     let mut bucket_trades: Vec<&(f64, f64, DateTime<Utc>)> = Vec::new();
 
     for trade in &trades {
         if trade.2 >= bucket_start + bucket_duration {
-            // Process completed bucket
             if let Some(signal) = analyze_bucket_for_wicks(event_id, &bucket_trades) {
                 signals.push(signal);
             }
@@ -123,7 +100,6 @@ pub async fn detect_wicks(
         bucket_trades.push(trade);
     }
 
-    // Process last bucket
     if let Some(signal) = analyze_bucket_for_wicks(event_id, &bucket_trades) {
         signals.push(signal);
     }
@@ -143,23 +119,17 @@ fn analyze_bucket_for_wicks(
     let raw_low = trades.iter().map(|t| t.0).fold(f64::MAX, f64::min);
     let raw_range = raw_high - raw_low;
 
-    // Simulate bucketed chart: open = first, close = last
     let open = trades.first().unwrap().0;
     let close = trades.last().unwrap().0;
     let bucketed_high = open.max(close);
     let bucketed_low = open.min(close);
 
-    // Hidden wick = raw extremes beyond bucketed range
     let hidden_up = raw_high - bucketed_high;
     let hidden_down = bucketed_low - raw_low;
     let max_hidden = hidden_up.max(hidden_down);
 
     if max_hidden >= WICK_THRESHOLD {
-        let direction = if hidden_up > hidden_down {
-            "up_wick"
-        } else {
-            "down_wick"
-        };
+        let direction = if hidden_up > hidden_down { "up_wick" } else { "down_wick" };
 
         let meta = WickMetadata {
             wick_high: raw_high,
@@ -189,8 +159,6 @@ fn analyze_bucket_for_wicks(
 
 // ── Volume Spike Detection ─────────────────────────────────────────
 
-/// Detect volume spikes by comparing 15-min rolling windows against
-/// the 1-hour rolling average. Spikes > 2x average are flagged.
 pub async fn detect_volume_spikes(
     pool: &PgPool,
     event_id: &str,
@@ -199,22 +167,24 @@ pub async fn detect_volume_spikes(
     let since = Utc::now() - Duration::hours(lookback_hours);
     let mut signals = Vec::new();
 
-    // Get trade volumes grouped by 15-min windows
+    // FIXED: was `(EXTRACT ... % $3) * INTERVAL '1 minute'` which is invalid PG.
+    // Now uses make_interval(mins => ...) — type-safe, no string concat.
     let windows: Vec<(DateTime<Utc>, f64, f64, f64)> = sqlx::query_as(
         "WITH bucketed AS (
-            SELECT 
-                date_trunc('minute', trade_timestamp) 
-                    - (EXTRACT(MINUTE FROM trade_timestamp)::int % $3) * INTERVAL '1 minute' AS window_start,
+            SELECT
+                date_trunc('minute', trade_timestamp)
+                    - make_interval(mins => (EXTRACT(MINUTE FROM trade_timestamp)::int % $3))
+                    AS window_start,
                 size,
-                side
+                COALESCE(side, '') AS side
             FROM raw_trades
             WHERE event_id = $1 AND trade_timestamp >= $2
         )
-        SELECT 
+        SELECT
             window_start,
-            SUM(size) AS total_volume,
-            SUM(CASE WHEN side = 'buy' THEN size ELSE 0 END) AS buy_vol,
-            SUM(CASE WHEN side = 'sell' THEN size ELSE 0 END) AS sell_vol
+            SUM(size)::float8                                         AS total_volume,
+            SUM(CASE WHEN side = 'buy'  THEN size ELSE 0 END)::float8 AS buy_vol,
+            SUM(CASE WHEN side = 'sell' THEN size ELSE 0 END)::float8 AS sell_vol
         FROM bucketed
         GROUP BY window_start
         ORDER BY window_start ASC"
@@ -226,10 +196,9 @@ pub async fn detect_volume_spikes(
     .await?;
 
     if windows.len() < 4 {
-        return Ok(signals); // Need baseline
+        return Ok(signals);
     }
 
-    // Calculate rolling average (lookback of VOLUME_BASELINE_MINS / VOLUME_WINDOW_MINS windows)
     let baseline_windows = (VOLUME_BASELINE_MINS / VOLUME_WINDOW_MINS) as usize;
 
     for i in baseline_windows..windows.len() {
@@ -240,7 +209,7 @@ pub async fn detect_volume_spikes(
             / baseline_windows as f64;
 
         if avg_volume < 1.0 {
-            continue; // Skip near-zero baseline
+            continue;
         }
 
         let current_volume = windows[i].1;
@@ -284,8 +253,6 @@ pub async fn detect_volume_spikes(
 
 // ── Liquidity Gap Detection ────────────────────────────────────────
 
-/// Detect liquidity gaps: consecutive trades with large price jumps,
-/// indicating thin order books and potential for slippage.
 pub async fn detect_liquidity_gaps(
     pool: &PgPool,
     event_id: &str,
@@ -336,7 +303,6 @@ pub async fn detect_liquidity_gaps(
 
 // ── Database Persistence ───────────────────────────────────────────
 
-/// Store computed alpha signals in the database.
 pub async fn persist_signals(pool: &PgPool, signals: &[AlphaSignal]) -> anyhow::Result<usize> {
     if signals.is_empty() {
         return Ok(0);
@@ -365,13 +331,14 @@ pub async fn persist_signals(pool: &PgPool, signals: &[AlphaSignal]) -> anyhow::
     Ok(inserted)
 }
 
-/// Fetch alpha signals for an event, optionally filtered by type.
 pub async fn get_signals(
     pool: &PgPool,
     event_id: &str,
     signal_type: Option<&str>,
     limit: i64,
 ) -> anyhow::Result<Vec<AlphaSignal>> {
+    let limit = limit.clamp(1, 500);
+
     let signals = if let Some(st) = signal_type {
         sqlx::query_as::<_, AlphaSignal>(
             "SELECT id, event_id, signal_type, magnitude, metadata, created_at
@@ -404,8 +371,6 @@ pub async fn get_signals(
 
 // ── Background Analysis Loop ───────────────────────────────────────
 
-/// Run alpha detection on all active markets.
-/// Call this from main.rs as a spawned task, runs after trade ingestion.
 pub async fn run_alpha_detection_loop(pool: PgPool) {
     tracing::info!("🔍 Starting alpha signal detection loop");
 
@@ -414,7 +379,6 @@ pub async fn run_alpha_detection_loop(pool: PgPool) {
     loop {
         interval.tick().await;
 
-        // Get events with recent raw trades
         let active_events: Vec<(String,)> = match sqlx::query_as(
             "SELECT DISTINCT event_id FROM raw_trades
              WHERE ingested_at > NOW() - INTERVAL '10 minutes'"
@@ -429,10 +393,14 @@ pub async fn run_alpha_detection_loop(pool: PgPool) {
             }
         };
 
+        if active_events.is_empty() {
+            tracing::debug!("Alpha loop: no recently-active events, skipping cycle");
+            continue;
+        }
+
         let mut total_signals = 0usize;
 
         for (event_id,) in &active_events {
-            // Run all three detectors
             let mut all_signals = Vec::new();
 
             if let Ok(wicks) = detect_wicks(&pool, event_id, 4).await {
