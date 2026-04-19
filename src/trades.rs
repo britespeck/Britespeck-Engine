@@ -86,7 +86,7 @@ async fn fetch_polymarket_trades(
 
 // ── Kalshi ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct KalshiTradesResponse {
     #[serde(default)]
     trades: Vec<KalshiTrade>,
@@ -95,7 +95,7 @@ struct KalshiTradesResponse {
 #[derive(Debug, Deserialize)]
 struct KalshiTrade {
     #[serde(default)]
-    yes_price: Option<i64>,   // cents (0-100)
+    yes_price: Option<i64>, // cents (0-100)
     #[serde(default)]
     count: Option<i64>,
     #[serde(default)]
@@ -178,6 +178,45 @@ async fn persist_trades(
     }
 
     Ok(inserted)
+}
+
+// ── Public query API (used by endpoints.rs) ────────────────────────
+
+/// Query persisted trades for an event, optionally filtered by `since` timestamp.
+pub async fn get_trades(
+    pool: &PgPool,
+    event_id: &str,
+    since: Option<DateTime<Utc>>,
+    limit: i64,
+) -> anyhow::Result<Vec<RawTrade>> {
+    let rows = if let Some(ts) = since {
+        sqlx::query_as::<_, RawTrade>(
+            "SELECT id, event_id, platform, price, size, side, trade_timestamp, ingested_at
+             FROM public.raw_trades
+             WHERE event_id = $1 AND trade_timestamp >= $2
+             ORDER BY trade_timestamp DESC
+             LIMIT $3"
+        )
+        .bind(event_id)
+        .bind(ts)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, RawTrade>(
+            "SELECT id, event_id, platform, price, size, side, trade_timestamp, ingested_at
+             FROM public.raw_trades
+             WHERE event_id = $1
+             ORDER BY trade_timestamp DESC
+             LIMIT $2"
+        )
+        .bind(event_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
+
+    Ok(rows)
 }
 
 // ── Active markets selector ────────────────────────────────────────

@@ -171,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let trade_pool = api_pool.clone();
     let trade_client = reqwest::Client::new();
-    tokio::spawn(trades::run_trade_ingestion_loop(trade_pool, trade_client));
+    tokio::spawn(trades::run_trade_ingestion_loop(trade_pool));
     tokio::spawn(alpha::run_alpha_detection_loop(api_pool.clone()));
 
     tokio::spawn(async move {
