@@ -203,7 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut statuses = Vec::new();
                 let mut icons = Vec::new();
                 let mut externals = Vec::new();
-                let mut volumes = Vec::new();
+                let mut volumes: Vec<Option<f64>> = Vec::new();
                 let mut outcomes = Vec::new();
                 let mut urls = Vec::new();
                 let mut ends = Vec::new();
@@ -266,7 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // ── NEW: snapshot prices for /market_history ──────────
                 match market_history::write_snapshots(
-                    &sync_pool, &ids, &titles, &platforms, &odds, &volumes,
+                    &sync_pool, &ids, &titles, &platforms, &odds, volumes.as_slice(),
                 ).await {
                     Ok(n) => println!("📈 Wrote {} market_history snapshots", n),
                     Err(e) => eprintln!("⚠️ Snapshot write failed: {}", e),
