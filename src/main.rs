@@ -6,6 +6,7 @@ mod trades;
 mod alpha;
 mod ev_engine;
 mod endpoints;
+mod market_history;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -162,6 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/index_history", get(get_index_history))
         .route("/backtest", get(get_backtest))
         .merge(endpoints::alpha_routes())
+        .merge(market_history::routes())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
@@ -261,6 +263,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(res) => println!("💾 Batch persisted {} events", res.rows_affected()),
                     Err(e) => eprintln!("❌ Batch upsert failed: {}", e),
                 }
+
+                // ── NEW: snapshot prices for /market_history ──────────
+                match market_history::write_snapshots(
+                    &sync_pool, &ids, &titles, &platforms, &odds, &volumes,
+                ).await {
+                    Ok(n) => println!("📈 Wrote {} market_history snapshots", n),
+                    Err(e) => eprintln!("⚠️ Snapshot write failed: {}", e),
+                }
             }
 
             if let Err(e) = strategy::run_omg_strategy(&sync_pool).await {
@@ -278,3 +288,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
