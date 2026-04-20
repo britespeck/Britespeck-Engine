@@ -165,7 +165,7 @@ pub async fn write_snapshots(
     titles: &[String],
     platforms: &[String],
     odds: &[f64],
-    volumes: &[Option<f64>],
+    volumes: &[f64],
 ) -> Result<u64, sqlx::Error> {
     if ids.is_empty() {
         return Ok(0);

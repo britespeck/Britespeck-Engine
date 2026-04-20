@@ -203,7 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut statuses = Vec::new();
                 let mut icons = Vec::new();
                 let mut externals = Vec::new();
-                let mut volumes: Vec<Option<f64>> = Vec::new();
+                let mut volumes: Vec<f64> = Vec::new();
                 let mut outcomes = Vec::new();
                 let mut urls = Vec::new();
                 let mut ends = Vec::new();
@@ -288,4 +288,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
 
