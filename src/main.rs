@@ -20,7 +20,6 @@ use tower_http::compression::CompressionLayer;
 use serde::{Serialize, Deserialize};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use user_bots::{get_user_bot, create_user_bot, update_user_bot};
 
 #[derive(Serialize, sqlx::FromRow)]
 struct PredictionEvent {
@@ -162,15 +161,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/prediction_events/:id/icon", patch(patch_event_icon))
         .route("/index_history", get(get_index_history))
         .route("/backtest", get(get_backtest))
-        .route("/user_bots", get(get_user_bot).post(create_user_bot))
-        .route("/user_bots/:id", patch(update_user_bot))
         .merge(endpoints::alpha_routes())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
 
     let trade_pool = api_pool.clone();
-    let trade_client = reqwest::Client::new();
+    let _trade_client = reqwest::Client::new();
     tokio::spawn(trades::run_trade_ingestion_loop(trade_pool));
     tokio::spawn(alpha::run_alpha_detection_loop(api_pool.clone()));
 
