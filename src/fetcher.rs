@@ -552,7 +552,13 @@ impl MarketFetcher {
                     .unwrap();
                 let odds = extract_kalshi_price(best_market);
 
-                let mut outcomes: Vec<MarketOutcome> = active_markets.iter().take(5).map(|m| {
+                // 🔧 Sort by price DESC so top contenders are kept (not arbitrary order), then take top 15
+                let mut sorted_markets: Vec<&Value> = active_markets.iter().collect();
+                sorted_markets.sort_by(|a, b| {
+                    extract_kalshi_price(b).total_cmp(&extract_kalshi_price(a))
+                });
+
+                let mut outcomes: Vec<MarketOutcome> = sorted_markets.iter().take(15).map(|m| {
                     let name = m.get("yes_sub_title")
                         .or_else(|| m.get("title"))
                         .or_else(|| m.get("subtitle"))
@@ -714,7 +720,13 @@ impl MarketFetcher {
                 // 🔑 Extract CLOB YES token from the headline market
                 let clob_token_yes = extract_poly_clob_token(best_market);
 
-                let mut outcomes: Vec<MarketOutcome> = active_markets.iter().take(5).map(|m| {
+                // 🔧 Sort by price DESC so top contenders are kept (not arbitrary order), then take top 15
+                let mut sorted_markets: Vec<&&Value> = active_markets.iter().collect();
+                sorted_markets.sort_by(|a, b| {
+                    extract_poly_price(b).total_cmp(&extract_poly_price(a))
+                });
+
+                let mut outcomes: Vec<MarketOutcome> = sorted_markets.iter().take(15).map(|m| {
                     let name = m.get("question").or_else(|| m.get("groupItemTitle"))
                         .and_then(|t| t.as_str()).unwrap_or("Yes").to_string();
                     MarketOutcome {
