@@ -171,12 +171,16 @@ fn categorize_by_title(title: &str) -> Option<&'static str> {
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────────────
+
+/// 🔧 Hardened image extractor: rejects empty, non-https, and Kalshi /chart URLs.
 fn extract_image(value: &Value, keys: &[&str]) -> Option<String> {
     for key in keys {
         if let Some(v) = value.get(key).and_then(|v| v.as_str()) {
-            if !v.is_empty() && v.starts_with("http") {
-                return Some(v.to_string());
-            }
+            let s = v.trim();
+            if s.is_empty() { continue; }
+            if !s.starts_with("https://") && !s.starts_with("http://") { continue; }
+            if s.contains("/chart") { continue; } // 🚫 reject Kalshi chart endpoints
+            return Some(s.to_string());
         }
     }
     None
@@ -229,19 +233,16 @@ fn extract_kalshi_price(market: &Value) -> f64 {
 fn extract_kalshi_market_volume(market: &Value) -> f64 {
     let price = extract_kalshi_price(market);
 
-    // 1. Rolling 24h contract volume (in cents) → multiply by price for $ value
     for key in &["volume_24h_fp", "volume_24h", "volume24h"] {
         if let Some(v) = market.get(key).and_then(value_as_f64) {
             if v > 0.0 { return v * price; }
         }
     }
 
-    // 2. Rolling 24h dollar volume (already in dollars)
     if let Some(v) = market.get("dollar_volume_24h").and_then(value_as_f64) {
         if v > 0.0 { return v; }
     }
 
-    // 3. Lifetime fallbacks (stale-looking but better than zero)
     if let Some(v) = market.get("dollar_volume").and_then(value_as_f64) {
         if v > 0.0 { return v; }
     }
@@ -349,7 +350,10 @@ impl MarketFetcher {
         }
     }
 
+    /// 🔧 Pull image_url from event-detail and series endpoints.
+    /// Kalshi series tickers are UPPERCASE (e.g. KXNBA, KXBTC) — do NOT lowercase.
     async fn fetch_kalshi_series_image(client: &reqwest::Client, event_ticker: &str) -> Option<String> {
+        // 1. Event detail endpoint — most reliable source of image_url
         let event_url = format!(
             "https://api.elections.kalshi.com/trade-api/v2/events/{}",
             event_ticker
@@ -359,21 +363,19 @@ impl MarketFetcher {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<Value>().await {
                     let event_obj = json.get("event").unwrap_or(&json);
-                    let img_keys = ["image_url", "featured_image_url", "thumbnail_url",
-                        "category_image_url", "og_image_url"];
-                    for key in &img_keys {
-                        if let Some(url) = event_obj.get(key).and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty() && s.starts_with("http"))
-                        {
-                            return Some(url.to_string());
-                        }
+
+                    let img_keys = [
+                        "image_url", "featured_image_url", "thumbnail_url",
+                        "category_image_url", "og_image_url",
+                    ];
+                    if let Some(url) = extract_image(event_obj, &img_keys) {
+                        return Some(url);
                     }
+
                     if let Some(markets) = event_obj.get("markets").and_then(|m| m.as_array()) {
                         for m in markets {
-                            if let Some(url) = m.get("image_url").and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty() && s.starts_with("http"))
-                            {
-                                return Some(url.to_string());
+                            if let Some(url) = extract_image(m, &["image_url", "thumbnail_url"]) {
+                                return Some(url);
                             }
                         }
                     }
@@ -381,7 +383,8 @@ impl MarketFetcher {
             }
         }
 
-        let series_ticker = event_ticker.split('-').next().unwrap_or(event_ticker).to_lowercase();
+        // 2. Series endpoint — fallback. Series ticker is UPPERCASE in the API
+        let series_ticker = event_ticker.split('-').next().unwrap_or(event_ticker);
         let series_url = format!(
             "https://api.elections.kalshi.com/trade-api/v2/series/{}",
             series_ticker
@@ -390,12 +393,11 @@ impl MarketFetcher {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<Value>().await {
                     let series_obj = json.get("series").unwrap_or(&json);
-                    for key in &["image_url", "category_image_url"] {
-                        if let Some(url) = series_obj.get(key).and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty() && s.starts_with("http"))
-                        {
-                            return Some(url.to_string());
-                        }
+                    if let Some(url) = extract_image(
+                        series_obj,
+                        &["image_url", "category_image_url", "thumbnail_url"],
+                    ) {
+                        return Some(url);
                     }
                 }
             }
@@ -403,6 +405,7 @@ impl MarketFetcher {
         None
     }
 
+    /// 🔧 Smart caching: positive hits cached; failures retried next sync.
     async fn get_kalshi_image(
         &self,
         client: &reqwest::Client,
@@ -410,17 +413,25 @@ impl MarketFetcher {
         event_level_image: &Option<String>,
     ) -> Option<String> {
         if let Some(img) = event_level_image {
-            if !img.is_empty() { return Some(img.clone()); }
+            if !img.is_empty() && !img.contains("/chart") {
+                return Some(img.clone());
+            }
         }
+
         {
             let cache = self.kalshi_image_cache.lock().unwrap();
-            if let Some(cached) = cache.get(event_ticker) { return cached.clone(); }
+            if let Some(Some(cached_url)) = cache.get(event_ticker) {
+                return Some(cached_url.clone());
+            }
         }
+
         let result = Self::fetch_kalshi_series_image(client, event_ticker).await;
-        {
+
+        if result.is_some() {
             let mut cache = self.kalshi_image_cache.lock().unwrap();
             cache.insert(event_ticker.to_string(), result.clone());
         }
+
         result
     }
 
@@ -436,6 +447,9 @@ impl MarketFetcher {
         let mut kalshi_pages = 0u32;
         let mut kalshi_retries = 0u32;
         let max_kalshi_retries = 3u32;
+
+        let mut kalshi_img_total = 0u32;
+        let mut kalshi_img_hits = 0u32;
 
         loop {
             kalshi_pages += 1;
@@ -529,6 +543,9 @@ impl MarketFetcher {
                 ]);
                 let icon = self.get_kalshi_image(kalshi_client, &ticker, &event_image).await;
 
+                kalshi_img_total += 1;
+                if icon.is_some() { kalshi_img_hits += 1; }
+
                 let nested = event.get("markets").and_then(|m| m.as_array()).cloned().unwrap_or_default();
 
                 let active_markets: Vec<Value> = nested.into_iter()
@@ -552,7 +569,6 @@ impl MarketFetcher {
                     .unwrap();
                 let odds = extract_kalshi_price(best_market);
 
-                // 🔧 Sort by price DESC so top contenders are kept (not arbitrary order), then take top 15
                 let mut sorted_markets: Vec<&Value> = active_markets.iter().collect();
                 sorted_markets.sort_by(|a, b| {
                     extract_kalshi_price(b).total_cmp(&extract_kalshi_price(a))
@@ -584,7 +600,6 @@ impl MarketFetcher {
                     .and_then(|v| v.as_str())
                     .and_then(parse_datetime);
 
-                // 🔧 FIXED: Use event_ticker (not market_ticker) — Kalshi web URLs only resolve at event level
                 let series = ticker.split('-').next().unwrap_or(ticker.as_str()).to_lowercase();
                 let market_url = Some(format!(
                     "https://kalshi.com/markets/{}/{}",
@@ -607,7 +622,7 @@ impl MarketFetcher {
                     status: "active".to_string(),
                     end_date,
                     market_url,
-                    clob_token_yes: None, // Kalshi doesn't use CLOB tokens
+                    clob_token_yes: None,
                 };
 
                 kalshi_map.insert(pe.external_id.clone(), pe);
@@ -621,7 +636,13 @@ impl MarketFetcher {
             if kalshi_cursor.is_none() { break; }
         }
 
-        println!("✅ Kalshi events collected (deduped): {}", kalshi_map.len());
+        let pct = if kalshi_img_total > 0 {
+            (kalshi_img_hits as f64 / kalshi_img_total as f64) * 100.0
+        } else { 0.0 };
+        println!(
+            "✅ Kalshi events collected (deduped): {} | 🖼️ image coverage: {}/{} ({:.1}%)",
+            kalshi_map.len(), kalshi_img_hits, kalshi_img_total, pct
+        );
 
         // ─── POLYMARKET ──────────────────────────────────────────────
         let mut poly_map: HashMap<String, PredictionEvent> = HashMap::new();
@@ -717,10 +738,8 @@ impl MarketFetcher {
                     .unwrap();
                 let odds = extract_poly_price(best_market);
 
-                // 🔑 Extract CLOB YES token from the headline market
                 let clob_token_yes = extract_poly_clob_token(best_market);
 
-                // 🔧 Sort by price DESC so top contenders are kept (not arbitrary order), then take top 15
                 let mut sorted_markets: Vec<&&Value> = active_markets.iter().collect();
                 sorted_markets.sort_by(|a, b| {
                     extract_poly_price(b).total_cmp(&extract_poly_price(a))
@@ -759,7 +778,7 @@ impl MarketFetcher {
                     status: "active".to_string(),
                     end_date,
                     market_url,
-                    clob_token_yes, // 🔑 Polymarket CLOB YES token
+                    clob_token_yes,
                 };
 
                 poly_map.insert(pe.external_id.clone(), pe);
