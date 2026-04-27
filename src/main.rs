@@ -170,13 +170,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
 
+    // ── Background workers ──
     let trade_pool = api_pool.clone();
-    let _trade_client = reqwest::Client::new();
     tokio::spawn(trades::run_trade_ingestion_loop(trade_pool));
     tokio::spawn(alpha::run_alpha_detection_loop(api_pool.clone()));
-    tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
-    tokio::spawn(fetchers::kalshi_ws::run_kalshi_ws_loop(api_pool.clone()));
 
+    // Polymarket CLOB websocket (public, no auth)
+    tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
+
+    // Kalshi WebSocket (RSA-signed). Pre-fetch the top tickers by volume so we don't
+    // subscribe to dead/illiquid markets, then auto-reconnect on disconnect.
+    let kalshi_pool = api_pool.clone();
+    tokio::spawn(async move {
+        loop {
+            // Refresh ticker list each reconnect cycle so newly-listed hot markets get added.
+            let kalshi_tickers: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT external_id FROM prediction_events \
+                 WHERE platform = 'Kalshi' AND external_id IS NOT NULL \
+                 ORDER BY volume_24h DESC NULLS LAST LIMIT 200"
+            )
+            .fetch_all(&kalshi_pool)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("⚠️  kalshi_ws ticker fetch failed: {e}");
+                vec![]
+            });
+
+            if kalshi_tickers.is_empty() {
+                eprintln!("⚠️  kalshi_ws: no tickers yet, retrying in 30s");
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+
+            println!("🟢 kalshi_ws: subscribing to {} tickers", kalshi_tickers.len());
+            if let Err(e) = fetchers::kalshi_ws::run_kalshi_ws_loop(
+                kalshi_pool.clone(),
+                kalshi_tickers,
+            ).await {
+                eprintln!("❌ kalshi_ws ended: {e} — reconnecting in 5s");
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+
+    // ── Main REST sync loop (Kalshi + Polymarket markets metadata) ──
     tokio::spawn(async move {
         let fetcher = MarketFetcher::new();
         let mut kalshi_headers = HeaderMap::new();
@@ -291,5 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+
 
 
