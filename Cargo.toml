@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 # Web Server
 axum = "0.7"
-# ADDED: compression-gzip feature here
 tower-http = { version = "0.5", features = ["cors", "compression-gzip"] }
 anyhow = "1"
 tracing = "0.1"
@@ -17,10 +16,12 @@ tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Authentication (Needed for Polymarket)
+# Authentication (Polymarket + Kalshi RSA signing)
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.21"
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+rand = "0.8"
 
 # Database
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "chrono", "uuid"] }
@@ -28,7 +29,12 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 dotenv = "0.15"
 
-# Scraping
+# HTTP / WebSocket
 reqwest = { version = "0.11", features = ["cookies", "json"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+async-trait = "0.1"
+
+# Misc
 regex = "1.12.3"
 urlencoding = "2"

@@ -7,6 +7,8 @@ mod alpha;
 mod ev_engine;
 mod endpoints;
 mod market_history;
+mod fetchers;
+mod orderbook;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -134,7 +136,6 @@ async fn patch_event_icon(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
-
     tracing_subscriber::fmt::init();
 
     let database_url = env::var("DATABASE_URL")
@@ -164,6 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/backtest", get(get_backtest))
         .merge(endpoints::alpha_routes())
         .merge(market_history::routes())
+        .merge(orderbook::routes())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
@@ -172,6 +174,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _trade_client = reqwest::Client::new();
     tokio::spawn(trades::run_trade_ingestion_loop(trade_pool));
     tokio::spawn(alpha::run_alpha_detection_loop(api_pool.clone()));
+    tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
+    tokio::spawn(fetchers::kalshi_ws::run_kalshi_ws_loop(api_pool.clone()));
 
     tokio::spawn(async move {
         let fetcher = MarketFetcher::new();
@@ -264,7 +268,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => eprintln!("❌ Batch upsert failed: {}", e),
                 }
 
-                // ── NEW: snapshot prices for /market_history ──────────
                 match market_history::write_snapshots(
                     &sync_pool, &ids, &titles, &platforms, &odds, volumes.as_slice(),
                 ).await {
