@@ -198,6 +198,8 @@ dependencies = [
  "dotenv",
  "futures-util",
  "hmac",
+ "pkcs1",
+ "pkcs8",
  "rand",
  "regex",
  "reqwest",
