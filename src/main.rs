@@ -183,10 +183,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kalshi_pool = api_pool.clone();
     tokio::spawn(async move {
         loop {
-            // Refresh ticker list each reconnect cycle so newly-listed hot markets get added.
             let kalshi_tickers: Vec<String> = sqlx::query_scalar(
-                "SELECT DISTINCT external_id FROM prediction_events \
-                 WHERE platform = 'Kalshi' AND external_id IS NOT NULL \
+                "SELECT external_id FROM ( \
+                   SELECT DISTINCT ON (external_id) external_id, volume_24h \
+                   FROM prediction_events \
+                   WHERE platform = 'Kalshi' AND external_id IS NOT NULL \
+                   ORDER BY external_id, volume_24h DESC NULLS LAST \
+                 ) t \
                  ORDER BY volume_24h DESC NULLS LAST LIMIT 200"
             )
             .fetch_all(&kalshi_pool)
