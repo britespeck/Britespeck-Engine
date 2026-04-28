@@ -1,9 +1,9 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     routing::get,
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlx::PgPool;
 
 #[derive(Serialize)]
@@ -21,76 +21,12 @@ pub struct OrderbookSnapshot {
     pub captured_at: String,
     pub bids: Vec<OrderbookLevel>,
     pub asks: Vec<OrderbookLevel>,
-    pub spread: Option<f64>,
-    pub mid_price: Option<f64>,
 }
 
 #[derive(Serialize)]
 pub struct OrderbookResponse {
     pub snapshot: Option<OrderbookSnapshot>,
 }
-
-pub async fn get_orderbook(
-    State(pool): State<PgPool>,
-    Path(event_id): Path<String>,
-) -> Json<OrderbookResponse> {
-    // Latest captured_at for this event
-    let latest: Option<(chrono::DateTime<chrono::Utc>, String, Option<String>)> = sqlx::query_as(
-        "SELECT captured_at, platform, token_id
-         FROM orderbook_snapshots
-         WHERE event_id = $1
-         ORDER BY captured_at DESC
-         LIMIT 1"
-    )
-    .bind(&event_id)
-    .fetch_optional(&pool)
-    .await
-    .ok()
-    .flatten();
-
-    let Some((captured_at, platform, token_id)) = latest else {
-        return Json(OrderbookResponse { snapshot: None });
-    };
-
-    // All rows from that snapshot moment
-    let rows: Vec<(String, f64, f64, i32)> = sqlx::query_as(
-        "SELECT side, price, size, level
-         FROM orderbook_snapshots
-         WHERE event_id = $1 AND captured_at = $2
-         ORDER BY level ASC"
-    )
-    .bind(&event_id)
-    .bind(captured_at)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
-
-    let mut bids: Vec<OrderbookLevel> = rows.iter().filter(|r| r.0 == "bid")
-        .map(|r| OrderbookLevel { price: r.1, size: r.2, level: r.3 }).collect();
-    let mut asks: Vec<OrderbookLevel> = rows.iter().filter(|r| r.0 == "ask")
-        .map(|r| OrderbookLevel { price: r.1, size: r.2, level: r.3 }).collect();
-
-    bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
-    asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
-
-    let best_bid = bids.first().map(|b| b.price);
-    let best_ask = asks.first().map(|a| a.price);
-    let spread = match (best_bid, best_ask) { (Some(b), Some(a)) => Some(a - b), _ => None };
-    let mid_price = match (best_bid, best_ask) { (Some(b), Some(a)) => Some((a + b) / 2.0), _ => None };
-
-    Json(OrderbookResponse {
-        snapshot: Some(OrderbookSnapshot {
-            event_id, platform, token_id,
-            captured_at: captured_at.to_rfc3339(),
-            bids: bids.into_iter().take(10).collect(),
-            asks: asks.into_iter().take(10).collect(),
-            spread, mid_price,
-        }),
-    })
-}
-
-#[derive(Deserialize)]
-pub struct TradesQuery { pub limit: Option<i64> }
 
 #[derive(Serialize)]
 pub struct TradeRow {
@@ -104,44 +40,158 @@ pub struct TradeRow {
 }
 
 #[derive(Serialize)]
-pub struct TradesResponse { pub trades: Vec<TradeRow> }
+pub struct TradesResponse {
+    pub trades: Vec<TradeRow>,
+}
 
-pub async fn get_trades(
+/// Resolve a path param (UUID or external_id) into the list of keys
+/// our ingestors actually wrote into orderbook_snapshots / raw_trades / trades_tape.
+///
+/// Polymarket CLOB writes "polymarket:<id>" (== prediction_events.external_id)
+/// Kalshi WS writes the Kalshi ticker (also stored in external_id)
+/// We always include the raw param too, in case some rows were keyed by UUID.
+async fn resolve_event_keys(pool: &PgPool, param: &str) -> Vec<String> {
+    let mut keys = vec![param.to_string()];
+
+    // If param looks like a UUID, look up the external_id
+    if uuid::Uuid::parse_str(param).is_ok() {
+        if let Ok(row) = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT external_id FROM public.prediction_events WHERE id = $1::uuid",
+        )
+        .bind(param)
+        .fetch_one(pool)
+        .await
+        {
+            if let Some(ext) = row.0 {
+                if !ext.is_empty() && !keys.contains(&ext) {
+                    keys.push(ext);
+                }
+            }
+        }
+    } else {
+        // Param is an external_id — also resolve UUID for legacy rows
+        if let Ok(row) = sqlx::query_as::<_, (uuid::Uuid,)>(
+            "SELECT id FROM public.prediction_events WHERE external_id = $1",
+        )
+        .bind(param)
+        .fetch_one(pool)
+        .await
+        {
+            keys.push(row.0.to_string());
+        }
+    }
+
+    keys
+}
+
+async fn get_orderbook(
     State(pool): State<PgPool>,
     Path(event_id): Path<String>,
-    Query(q): Query<TradesQuery>,
+) -> Json<OrderbookResponse> {
+    let keys = resolve_event_keys(&pool, &event_id).await;
+
+    // Latest snapshot row across any matching key
+    let head = sqlx::query_as::<_, (String, String, Option<String>, chrono::DateTime<chrono::Utc>)>(
+        "SELECT event_id, platform, token_id, captured_at
+           FROM public.orderbook_snapshots
+          WHERE event_id = ANY($1)
+          ORDER BY captured_at DESC
+          LIMIT 1",
+    )
+    .bind(&keys)
+    .fetch_optional(&pool)
+    .await
+    .ok()
+    .flatten();
+
+    let Some((ev_id, platform, token_id, captured_at)) = head else {
+        return Json(OrderbookResponse { snapshot: None });
+    };
+
+    // Pull all rows from that exact snapshot timestamp
+    let rows = sqlx::query_as::<_, (String, f64, f64, i32)>(
+        "SELECT side, price, size, level
+           FROM public.orderbook_snapshots
+          WHERE event_id = $1 AND captured_at = $2
+          ORDER BY level ASC",
+    )
+    .bind(&ev_id)
+    .bind(captured_at)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let mut bids = Vec::new();
+    let mut asks = Vec::new();
+    for (side, price, size, level) in rows {
+        let lvl = OrderbookLevel { price, size, level };
+        match side.to_lowercase().as_str() {
+            "bid" | "buy" | "yes" => bids.push(lvl),
+            "ask" | "sell" | "no" => asks.push(lvl),
+            _ => {}
+        }
+    }
+
+    Json(OrderbookResponse {
+        snapshot: Some(OrderbookSnapshot {
+            event_id: ev_id,
+            platform,
+            token_id,
+            captured_at: captured_at.to_rfc3339(),
+            bids,
+            asks,
+        }),
+    })
+}
+
+async fn get_trades(
+    State(pool): State<PgPool>,
+    Path(event_id): Path<String>,
 ) -> Json<TradesResponse> {
-    let limit = q.limit.unwrap_or(50).min(200);
+    let keys = resolve_event_keys(&pool, &event_id).await;
 
-    let rows: Vec<(i64, String, String, f64, f64, chrono::DateTime<chrono::Utc>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT id, event_id, platform, price, size, trade_timestamp, side
-             FROM trades_tape
-             WHERE event_id = $1
-             ORDER BY trade_timestamp DESC
-             LIMIT $2"
-        )
-        .bind(&event_id)
-        .bind(limit)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or_default();
+    // UNION across raw_trades (Polymarket) and trades_tape (Kalshi).
+    // Cast id to text so the two id types unify.
+    let rows = sqlx::query_as::<_, (
+        String,
+        String,
+        String,
+        f64,
+        f64,
+        chrono::DateTime<chrono::Utc>,
+        Option<String>,
+    )>(
+        "SELECT id::text, event_id, platform, price, size, trade_timestamp, side
+           FROM public.raw_trades
+          WHERE event_id = ANY($1)
+         UNION ALL
+         SELECT id::text, event_id, platform, price, size, trade_timestamp, side
+           FROM public.trades_tape
+          WHERE event_id = ANY($1)
+          ORDER BY 6 DESC
+          LIMIT 100",
+    )
+    .bind(&keys)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
 
-    let trades = rows.into_iter().map(|r| TradeRow {
-        id: r.0.to_string(),
-        event_id: r.1,
-        platform: r.2,
-        price: r.3,
-        size: r.4,
-        trade_timestamp: r.5.to_rfc3339(),
-        side: r.6,
-    }).collect();
+    let trades = rows
+        .into_iter()
+        .map(|r| TradeRow {
+            id: r.0,
+            event_id: r.1,
+            platform: r.2,
+            price: r.3,
+            size: r.4,
+            trade_timestamp: r.5.to_rfc3339(),
+            side: r.6,
+        })
+        .collect();
 
     Json(TradesResponse { trades })
 }
 
-/// Routes exposed by this module — merged into the main router via
-/// `.merge(orderbook::routes())` in `main.rs`.
 pub fn routes() -> Router<PgPool> {
     Router::new()
         .route("/orderbook/:event_id", get(get_orderbook))
