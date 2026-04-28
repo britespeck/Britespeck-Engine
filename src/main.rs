@@ -165,7 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/backtest", get(get_backtest))
         .merge(endpoints::alpha_routes())
         .merge(market_history::routes())
-        .merge(orderbook::routes())
+        .nest("/book", orderbook::routes())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
