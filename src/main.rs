@@ -9,6 +9,7 @@ mod endpoints;
 mod market_history;
 mod fetchers;
 mod orderbook;
+mod indicators;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -165,6 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/backtest", get(get_backtest))
         .merge(endpoints::alpha_routes())
         .merge(market_history::routes())
+        .merge(indicators::routes())
         .nest("/book", orderbook::routes())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
@@ -174,6 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let trade_pool = api_pool.clone();
     tokio::spawn(trades::run_trade_ingestion_loop(trade_pool));
     tokio::spawn(alpha::run_alpha_detection_loop(api_pool.clone()));
+    tokio::spawn(indicators::run_indicator_loop(api_pool.clone()));
 
     // Polymarket CLOB websocket (public, no auth)
     tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
@@ -331,7 +334,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-
-
-

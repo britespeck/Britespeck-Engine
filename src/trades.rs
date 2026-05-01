@@ -16,7 +16,7 @@ pub struct RawTrade {
     pub platform: String,
     pub price: f64,
     pub size: f64,
-    pub side: Option<String>, // "buy" | "sell" | None when platform omits
+    pub side: Option<String>,
     pub trade_timestamp: DateTime<Utc>,
     pub ingested_at: DateTime<Utc>,
 }
@@ -26,6 +26,18 @@ struct ActiveMarket {
     event_id: String,
     platform: String,
     external_id: String,
+}
+
+/// Strip our internal "platform:" prefix to get the upstream API id.
+/// e.g. "polymarket:100371" → "100371", "kalshi:KXPRES-2024-DJT" → "KXPRES-2024-DJT"
+fn strip_platform_prefix(external_id: &str) -> &str {
+    if let Some(rest) = external_id.strip_prefix("polymarket:") {
+        return rest;
+    }
+    if let Some(rest) = external_id.strip_prefix("kalshi:") {
+        return rest;
+    }
+    external_id
 }
 
 // ── Polymarket CLOB ────────────────────────────────────────────────
@@ -46,9 +58,10 @@ async fn fetch_polymarket_trades(
     client: &Client,
     market_id: &str,
 ) -> anyhow::Result<Vec<(f64, f64, Option<String>, DateTime<Utc>)>> {
+    let upstream_id = strip_platform_prefix(market_id);
     let url = format!(
         "https://clob.polymarket.com/trades?market={}&limit=50",
-        market_id
+        upstream_id
     );
 
     let resp = client
@@ -58,7 +71,7 @@ async fn fetch_polymarket_trades(
         .await?;
 
     if !resp.status().is_success() {
-        anyhow::bail!("Polymarket {} returned {}", market_id, resp.status());
+        anyhow::bail!("Polymarket {} returned {}", upstream_id, resp.status());
     }
 
     let trades: Vec<PolymarketTrade> = resp.json().await.unwrap_or_default();
@@ -95,7 +108,7 @@ struct KalshiTradesResponse {
 #[derive(Debug, Deserialize)]
 struct KalshiTrade {
     #[serde(default)]
-    yes_price: Option<i64>, // cents (0-100)
+    yes_price: Option<i64>,
     #[serde(default)]
     count: Option<i64>,
     #[serde(default)]
@@ -108,9 +121,10 @@ async fn fetch_kalshi_trades(
     client: &Client,
     ticker: &str,
 ) -> anyhow::Result<Vec<(f64, f64, Option<String>, DateTime<Utc>)>> {
+    let upstream_ticker = strip_platform_prefix(ticker);
     let url = format!(
         "https://api.elections.kalshi.com/trade-api/v2/markets/trades?ticker={}&limit=50",
-        ticker
+        upstream_ticker
     );
 
     let resp = client
@@ -120,7 +134,7 @@ async fn fetch_kalshi_trades(
         .await?;
 
     if !resp.status().is_success() {
-        anyhow::bail!("Kalshi {} returned {}", ticker, resp.status());
+        anyhow::bail!("Kalshi {} returned {}", upstream_ticker, resp.status());
     }
 
     let body: KalshiTradesResponse = resp.json().await.unwrap_or_default();
@@ -222,8 +236,6 @@ pub async fn get_trades(
 // ── Active markets selector ────────────────────────────────────────
 
 async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<ActiveMarket>> {
-    // Only pull markets refreshed in the last 30 min — avoids fetching
-    // trades for stale or closed contracts.
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT external_id, platform, external_id
          FROM public.prediction_events
@@ -277,7 +289,8 @@ pub async fn run_trade_ingestion_loop(pool: PgPool) {
         let mut total_ingested = 0usize;
 
         for market in &markets {
-            let fetch_result = match market.platform.as_str() {
+            // Case-insensitive platform match — DB stores "Polymarket"/"Kalshi"
+            let fetch_result = match market.platform.to_lowercase().as_str() {
                 "polymarket" => fetch_polymarket_trades(&client, &market.external_id).await,
                 "kalshi" => fetch_kalshi_trades(&client, &market.external_id).await,
                 other => {
@@ -291,7 +304,7 @@ pub async fn run_trade_ingestion_loop(pool: PgPool) {
                     Ok(n) => total_ingested += n,
                     Err(e) => tracing::error!("Persist failed for {}: {}", market.event_id, e),
                 },
-                Ok(_) => {} // no new trades — silent
+                Ok(_) => {}
                 Err(e) => tracing::warn!(
                     "Fetch failed for {} ({}): {}",
                     market.event_id, market.platform, e
