@@ -244,25 +244,7 @@ pub async fn compute_and_persist(
             omg_score, omg_signal
          )
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-         ON CONFLICT (event_id, date_trunc('minute', computed_at))
-         DO UPDATE SET
-            vwap = EXCLUDED.vwap,
-            price_momentum_1h  = EXCLUDED.price_momentum_1h,
-            price_momentum_6h  = EXCLUDED.price_momentum_6h,
-            price_momentum_24h = EXCLUDED.price_momentum_24h,
-            book_imbalance     = EXCLUDED.book_imbalance,
-            spread_pct         = EXCLUDED.spread_pct,
-            volume_spike       = EXCLUDED.volume_spike,
-            ev_yes             = EXCLUDED.ev_yes,
-            ev_no              = EXCLUDED.ev_no,
-            kelly_fraction     = EXCLUDED.kelly_fraction,
-            cross_platform_delta = EXCLUDED.cross_platform_delta,
-            resolution_risk    = EXCLUDED.resolution_risk,
-            open_interest_delta = EXCLUDED.open_interest_delta,
-            news_sentiment     = EXCLUDED.news_sentiment,
-            omg_score          = EXCLUDED.omg_score,
-            omg_signal         = EXCLUDED.omg_signal,
-            computed_at        = EXCLUDED.computed_at"
+         ON CONFLICT DO NOTHING"
     )
     .bind(id)
     .bind(event_id)
