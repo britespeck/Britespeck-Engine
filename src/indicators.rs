@@ -531,11 +531,12 @@ async fn compute_cross_platform_delta(
         "Kalshi"
     };
 
-    let other: Option<(f64,)> = sqlx::query_as(
+    // Try pg_trgm similarity first, fall back to LIKE if extension not enabled
+    let other: Option<(f64,)> = match sqlx::query_as(
         "SELECT odds
          FROM public.prediction_events
          WHERE platform = $1
-           AND LOWER(title) % LOWER($2)  -- pg_trgm similarity
+           AND LOWER(title) % LOWER($2)
          ORDER BY similarity(LOWER(title), LOWER($2)) DESC,
                   volume_24h DESC NULLS LAST
          LIMIT 1",
@@ -544,21 +545,30 @@ async fn compute_cross_platform_delta(
     .bind(&title)
     .fetch_optional(pool)
     .await
-    // Fall back to LIKE if pg_trgm not enabled
-    .or_else(|_| async {
-        sqlx::query_as(
-            "SELECT odds
-             FROM public.prediction_events
-             WHERE platform = $1
-               AND LOWER(title) LIKE $2
-             ORDER BY volume_24h DESC NULLS LAST
-             LIMIT 1",
-        )
-        .bind(other_platform)
-        .bind(format!("%{}%", title.split_whitespace().take(4).collect::<Vec<_>>().join("%")))
-        .fetch_optional(pool)
-        .await
-    }.await)?;
+    {
+        Ok(result) => result,
+        Err(_) => {
+            // pg_trgm not available — fall back to keyword LIKE match
+            let keywords = title
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("%");
+            sqlx::query_as(
+                "SELECT odds
+                 FROM public.prediction_events
+                 WHERE platform = $1
+                   AND LOWER(title) LIKE $2
+                 ORDER BY volume_24h DESC NULLS LAST
+                 LIMIT 1",
+            )
+            .bind(other_platform)
+            .bind(format!("%{}%", keywords))
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None)
+        }
+    };
 
     Ok(other.map(|(other_price,)| {
         if platform.to_lowercase() == "kalshi" {
@@ -647,21 +657,6 @@ async fn compute_open_interest_delta(
     pool: &PgPool,
     event_id: Uuid,
 ) -> anyhow::Result<Option<f64>> {
-    let row: Option<(Option<f64>, Option<f64>)> = sqlx::query_as(
-        "SELECT
-            -- Current volume
-            (SELECT price FROM public.market_history
-             WHERE event_id = $1 ORDER BY recorded_at DESC LIMIT 1) AS current_vol,
-            -- Volume 24h ago
-            (SELECT price FROM public.market_history
-             WHERE event_id = $1
-               AND recorded_at <= NOW() - INTERVAL '24 hours'
-             ORDER BY recorded_at DESC LIMIT 1) AS vol_24h_ago",
-    )
-    .bind(event_id)
-    .fetch_optional(pool)
-    .await?;
-
     // Use volume_24h from prediction_events as direct source
     let vol_row: Option<(Option<f64>,)> = sqlx::query_as(
         "SELECT volume_24h FROM public.prediction_events WHERE id = $1",
