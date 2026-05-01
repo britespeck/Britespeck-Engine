@@ -65,7 +65,15 @@ struct PatchIconBody {
 
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
     let rows = sqlx::query_as::<_, PredictionEvent>(
-        "SELECT id, title, platform, odds, category, status, icon_url, external_id, volume_24h, updated_at, outcomes, market_url, end_date, rsi_signal, sentiment_score, clob_token_yes FROM public.prediction_events ORDER BY volume_24h DESC NULLS LAST LIMIT 50000"
+        "SELECT id, title, platform, odds, category, status, icon_url, external_id,
+                volume_24h, updated_at, outcomes, market_url, end_date,
+                rsi_signal, sentiment_score, clob_token_yes
+         FROM public.prediction_events
+         WHERE status = 'active'
+           AND volume_24h > 100
+           AND (end_date IS NULL OR end_date > NOW())
+         ORDER BY volume_24h DESC NULLS LAST
+         LIMIT 10000"
     )
     .fetch_all(&pool)
     .await
@@ -181,9 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Polymarket CLOB websocket (public, no auth)
     tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
 
-    // Kalshi WebSocket (RSA-signed).
-    // FIXED: strip the "kalshi:" prefix from external_id before passing to
-    // kalshi_ws so it doesn't double-prefix to "kalshi:kalshi:TICKER".
+    // Kalshi WebSocket — strip "kalshi:" prefix before passing to ws loop
     let kalshi_pool = api_pool.clone();
     tokio::spawn(async move {
         loop {
@@ -191,7 +197,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "SELECT REPLACE(external_id, 'kalshi:', '') FROM ( \
                    SELECT DISTINCT ON (external_id) external_id, volume_24h \
                    FROM prediction_events \
-                   WHERE platform = 'Kalshi' AND external_id IS NOT NULL \
+                   WHERE platform = 'Kalshi' \
+                     AND external_id IS NOT NULL \
+                     AND status = 'active' \
                    ORDER BY external_id, volume_24h DESC NULLS LAST \
                  ) t \
                  ORDER BY volume_24h DESC NULLS LAST LIMIT 200"
@@ -220,7 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // ── Main REST sync loop (Kalshi + Polymarket markets metadata) ──
+    // ── Main REST sync loop ──
     tokio::spawn(async move {
         let fetcher = MarketFetcher::new();
         let mut kalshi_headers = HeaderMap::new();
@@ -311,6 +319,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(res) => println!("💾 Batch persisted {} events", res.rows_affected()),
                     Err(e) => eprintln!("❌ Batch upsert failed: {}", e),
                 }
+
+                // Auto-close expired contracts every sync cycle
+                sqlx::query(
+                    "UPDATE public.prediction_events
+                     SET status = 'closed'
+                     WHERE status = 'active'
+                       AND end_date < NOW()"
+                )
+                .execute(&sync_pool)
+                .await
+                .ok();
+
+                // Auto-close zero volume contracts
+                sqlx::query(
+                    "UPDATE public.prediction_events
+                     SET status = 'closed'
+                     WHERE status = 'active'
+                       AND volume_24h < 1
+                       AND end_date IS NOT NULL
+                       AND end_date < NOW() + INTERVAL '1 hour'"
+                )
+                .execute(&sync_pool)
+                .await
+                .ok();
 
                 match market_history::write_snapshots(
                     &sync_pool, &ids, &titles, &platforms, &odds, volumes.as_slice(),

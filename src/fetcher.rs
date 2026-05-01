@@ -581,15 +581,42 @@ impl MarketFetcher {
                         .and_then(|t| t.as_str())
                         .unwrap_or("Yes")
                         .to_string();
+
+                    let parse_dollar = |key: &str| -> Option<f64> {
+                        m.get(key)
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .or_else(|| m.get(key).and_then(|v| v.as_f64()))
+                    };
+
                     MarketOutcome {
                         name,
                         price: extract_kalshi_price(m),
                         volume: extract_kalshi_market_volume(m),
+                        yes_bid: parse_dollar("yes_bid_dollars"),
+                        yes_ask: parse_dollar("yes_ask_dollars"),
+                        no_bid: parse_dollar("no_bid_dollars"),
+                        no_ask: parse_dollar("no_ask_dollars"),
+                        open_interest: m.get("open_interest_fp")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok()),
+                        volume_24h: m.get("volume_24h_fp")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok()),
+                        yes_sub_title: m.get("yes_sub_title")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        no_sub_title: m.get("no_sub_title")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
                     }
                 }).collect();
                 if outcomes.is_empty() {
                     outcomes.push(MarketOutcome {
                         name: "Yes".to_string(), price: odds, volume: total_volume,
+                        yes_bid: None, yes_ask: None, no_bid: None, no_ask: None,
+                        open_interest: None, volume_24h: None,
+                        yes_sub_title: None, no_sub_title: None,
                     });
                 }
 
@@ -752,11 +779,17 @@ impl MarketFetcher {
                         name,
                         price: extract_poly_price(m),
                         volume: extract_poly_market_volume(m),
+                        yes_bid: None, yes_ask: None, no_bid: None, no_ask: None,
+                        open_interest: None, volume_24h: None,
+                        yes_sub_title: None, no_sub_title: None,
                     }
                 }).collect();
                 if outcomes.is_empty() {
                     outcomes.push(MarketOutcome {
                         name: "Yes".to_string(), price: odds, volume: total_vol,
+                        yes_bid: None, yes_ask: None, no_bid: None, no_ask: None,
+                        open_interest: None, volume_24h: None,
+                        yes_sub_title: None, no_sub_title: None,
                     });
                 }
 
