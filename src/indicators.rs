@@ -297,16 +297,29 @@ pub async fn compute_and_persist(
 async fn compute_vwap(pool: &PgPool, event_id: Uuid) -> anyhow::Result<Option<f64>> {
     let since = Utc::now() - Duration::hours(24);
 
+    // Look up external_id and clob_token_yes for this event
+    let meta: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT external_id, clob_token_yes FROM public.prediction_events WHERE id = $1"
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let external_id = meta.as_ref().and_then(|(e, _)| e.clone()).unwrap_or_default();
+    let clob_token = meta.and_then(|(_, t)| t).unwrap_or_default();
+
     let row: Option<(Option<f64>,)> = sqlx::query_as(
         "SELECT
             SUM(price * size) / NULLIF(SUM(size), 0) AS vwap
          FROM public.raw_trades
-         WHERE event_id = $1::text
-            OR event_id = $2::text
-         AND trade_timestamp >= $3",
+         WHERE (event_id = $1::text
+            OR event_id = $2
+            OR event_id = $3)
+         AND trade_timestamp >= $4",
     )
     .bind(event_id.to_string())
-    .bind(format!("polymarket:{}", event_id))
+    .bind(&external_id)
+    .bind(&clob_token)
     .bind(since)
     .fetch_optional(pool)
     .await?;
@@ -372,17 +385,32 @@ async fn compute_book_signals(
     pool: &PgPool,
     event_id: Uuid,
 ) -> anyhow::Result<(Option<f64>, Option<f64>)> {
-    // Get top 5 bid and ask levels from latest snapshot
+    // Look up external_id and clob_token_yes — these are the actual keys
+    // written to orderbook_snapshots by polymarket_clob.rs and kalshi_ws.rs
+    let meta: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT external_id, clob_token_yes FROM public.prediction_events WHERE id = $1"
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let external_id = meta.as_ref().and_then(|(e, _)| e.clone()).unwrap_or_default();
+    let clob_token = meta.and_then(|(_, t)| t).unwrap_or_default();
+
+    // Search using UUID string, external_id (e.g. "polymarket:304265"),
+    // and clob_token_yes (the long number used as token_id in orderbook_snapshots)
     let rows: Vec<(String, f64, f64)> = sqlx::query_as(
         "SELECT side, price, size
          FROM public.orderbook_snapshots
          WHERE event_id = $1
             OR event_id = $2
+            OR token_id = $3
          ORDER BY captured_at DESC, level ASC
          LIMIT 20",
     )
     .bind(event_id.to_string())
-    .bind(format!("polymarket:{}", event_id))
+    .bind(&external_id)
+    .bind(&clob_token)
     .fetch_all(pool)
     .await?;
 
