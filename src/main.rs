@@ -72,6 +72,8 @@ async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<Predictio
          WHERE status = 'active'
            AND volume_24h > 100
            AND (end_date IS NULL OR end_date > NOW())
+           AND odds > 0.01
+           AND odds < 0.99
          ORDER BY volume_24h DESC NULLS LAST
          LIMIT 10000"
     )
@@ -292,10 +294,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         updated_at = EXCLUDED.updated_at,
                         outcomes = EXCLUDED.outcomes,
                         icon_url = COALESCE(EXCLUDED.icon_url, public.prediction_events.icon_url),
-                        status = EXCLUDED.status,
                         market_url = COALESCE(EXCLUDED.market_url, public.prediction_events.market_url),
                         category = COALESCE(EXCLUDED.category, public.prediction_events.category),
-                        clob_token_yes = COALESCE(EXCLUDED.clob_token_yes, public.prediction_events.clob_token_yes)
+                        clob_token_yes = COALESCE(EXCLUDED.clob_token_yes, public.prediction_events.clob_token_yes),
+                        -- CRITICAL: only update status to 'active' if not already manually closed
+                        status = CASE
+                            WHEN public.prediction_events.status = 'closed' THEN 'closed'
+                            ELSE EXCLUDED.status
+                        END
                     "#
                 )
                 .bind(&ids)
@@ -320,7 +326,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => eprintln!("❌ Batch upsert failed: {}", e),
                 }
 
-                // Auto-close expired contracts every sync cycle
+                // Auto-close expired contracts
                 sqlx::query(
                     "UPDATE public.prediction_events
                      SET status = 'closed'
@@ -331,7 +337,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .ok();
 
-                // Auto-close zero volume contracts
+                // Auto-close essentially resolved contracts (99¢+ or 1¢-)
+                sqlx::query(
+                    "UPDATE public.prediction_events
+                     SET status = 'closed'
+                     WHERE status = 'active'
+                       AND (odds > 0.99 OR odds < 0.01)"
+                )
+                .execute(&sync_pool)
+                .await
+                .ok();
+
+                // Auto-close zero volume with approaching end date
                 sqlx::query(
                     "UPDATE public.prediction_events
                      SET status = 'closed'
