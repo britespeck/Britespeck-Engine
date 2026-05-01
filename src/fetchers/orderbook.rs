@@ -44,40 +44,65 @@ pub struct TradesResponse {
     pub trades: Vec<TradeRow>,
 }
 
-/// Resolve a path param (UUID or external_id) into the list of keys
-/// our ingestors actually wrote into orderbook_snapshots / raw_trades / trades_tape.
+/// Resolve a UUID or external_id into all possible keys used across
+/// orderbook_snapshots and trades tables.
 ///
-/// Polymarket CLOB writes "polymarket:<id>" (== prediction_events.external_id)
-/// Kalshi WS writes the Kalshi ticker (also stored in external_id)
-/// We always include the raw param too, in case some rows were keyed by UUID.
+/// Polymarket CLOB writes event_id = external_id (e.g. "polymarket:304265")
+/// and token_id = clob_token_yes (the long number).
+/// Kalshi WS writes event_id = "kalshi:{ticker}".
+/// Frontend always passes the UUID from the URL.
+///
+/// So we look up the UUID, grab both external_id and clob_token_yes,
+/// and return all three as candidate keys.
 async fn resolve_event_keys(pool: &PgPool, param: &str) -> Vec<String> {
     let mut keys = vec![param.to_string()];
 
-    // If param looks like a UUID, look up the external_id
     if uuid::Uuid::parse_str(param).is_ok() {
-        if let Ok(row) = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT external_id FROM public.prediction_events WHERE id = $1::uuid",
+        // UUID path — look up external_id and clob_token_yes
+        if let Ok(Some(row)) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT external_id, clob_token_yes
+             FROM public.prediction_events
+             WHERE id = $1::uuid
+             LIMIT 1",
         )
         .bind(param)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
         {
+            // Add external_id (e.g. "polymarket:304265" or "kalshi:KXTICKER")
             if let Some(ext) = row.0 {
                 if !ext.is_empty() && !keys.contains(&ext) {
                     keys.push(ext);
                 }
             }
+            // Add clob_token_yes (the long Polymarket token number)
+            if let Some(token) = row.1 {
+                if !token.is_empty() && !keys.contains(&token) {
+                    keys.push(token);
+                }
+            }
         }
     } else {
-        // Param is an external_id — also resolve UUID for legacy rows
-        if let Ok(row) = sqlx::query_as::<_, (uuid::Uuid,)>(
-            "SELECT id FROM public.prediction_events WHERE external_id = $1",
+        // external_id path — also resolve UUID for any legacy rows
+        if let Ok(Some(row)) = sqlx::query_as::<_, (uuid::Uuid, Option<String>)>(
+            "SELECT id, clob_token_yes
+             FROM public.prediction_events
+             WHERE external_id = $1
+             LIMIT 1",
         )
         .bind(param)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
         {
-            keys.push(row.0.to_string());
+            let uid = row.0.to_string();
+            if !keys.contains(&uid) {
+                keys.push(uid);
+            }
+            if let Some(token) = row.1 {
+                if !token.is_empty() && !keys.contains(&token) {
+                    keys.push(token);
+                }
+            }
         }
     }
 
@@ -95,6 +120,7 @@ async fn get_orderbook(
         "SELECT event_id, platform, token_id, captured_at
            FROM public.orderbook_snapshots
           WHERE event_id = ANY($1)
+             OR token_id = ANY($1)
           ORDER BY captured_at DESC
           LIMIT 1",
     )
@@ -108,7 +134,7 @@ async fn get_orderbook(
         return Json(OrderbookResponse { snapshot: None });
     };
 
-    // Pull all rows from that exact snapshot timestamp
+    // Pull all levels from that exact snapshot timestamp
     let rows = sqlx::query_as::<_, (String, f64, f64, i32)>(
         "SELECT side, price, size, level
            FROM public.orderbook_snapshots
@@ -150,8 +176,7 @@ async fn get_trades(
 ) -> Json<TradesResponse> {
     let keys = resolve_event_keys(&pool, &event_id).await;
 
-    // UNION across raw_trades (Polymarket) and trades_tape (Kalshi).
-    // Cast id to text so the two id types unify.
+    // UNION raw_trades (Polymarket REST poll) + trades_tape (Kalshi WS)
     let rows = sqlx::query_as::<_, (
         String,
         String,
@@ -168,6 +193,7 @@ async fn get_trades(
          SELECT id::text, event_id, platform, price, size, trade_timestamp, side
            FROM public.trades_tape
           WHERE event_id = ANY($1)
+            AND trade_timestamp IS NOT NULL
           ORDER BY 6 DESC
           LIMIT 100",
     )

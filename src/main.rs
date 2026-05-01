@@ -181,13 +181,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Polymarket CLOB websocket (public, no auth)
     tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
 
-    // Kalshi WebSocket (RSA-signed). Pre-fetch the top tickers by volume so we don't
-    // subscribe to dead/illiquid markets, then auto-reconnect on disconnect.
+    // Kalshi WebSocket (RSA-signed).
+    // FIXED: strip the "kalshi:" prefix from external_id before passing to
+    // kalshi_ws so it doesn't double-prefix to "kalshi:kalshi:TICKER".
     let kalshi_pool = api_pool.clone();
     tokio::spawn(async move {
         loop {
             let kalshi_tickers: Vec<String> = sqlx::query_scalar(
-                "SELECT external_id FROM ( \
+                "SELECT REPLACE(external_id, 'kalshi:', '') FROM ( \
                    SELECT DISTINCT ON (external_id) external_id, volume_24h \
                    FROM prediction_events \
                    WHERE platform = 'Kalshi' AND external_id IS NOT NULL \
