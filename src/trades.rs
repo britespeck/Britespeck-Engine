@@ -57,11 +57,28 @@ struct PolymarketTrade {
 async fn fetch_polymarket_trades(
     client: &Client,
     market_id: &str,
+    pool: &sqlx::PgPool,
 ) -> anyhow::Result<Vec<(f64, f64, Option<String>, DateTime<Utc>)>> {
-    let upstream_id = strip_platform_prefix(market_id);
+    // Use public token_id endpoint — no auth needed
+    // https://clob.polymarket.com/trades?token_id=XXX
+    let token: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT clob_token_yes FROM public.prediction_events
+         WHERE external_id = $1 LIMIT 1"
+    )
+    .bind(market_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    let token_id = token.and_then(|(t,)| t).unwrap_or_default();
+
+    if token_id.is_empty() {
+        return Ok(vec![]);
+    }
+
     let url = format!(
-        "https://clob.polymarket.com/trades?market={}&limit=50",
-        upstream_id
+        "https://clob.polymarket.com/trades?token_id={}&limit=50",
+        token_id
     );
 
     let resp = client
@@ -71,51 +88,37 @@ async fn fetch_polymarket_trades(
         .await?;
 
     if !resp.status().is_success() {
-        anyhow::bail!("Polymarket {} returned {}", upstream_id, resp.status());
+        anyhow::bail!("Polymarket token {} returned {}", token_id, resp.status());
     }
 
-    let trades: Vec<PolymarketTrade> = resp.json().await.unwrap_or_default();
+    let trades: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
 
     let parsed = trades
         .into_iter()
         .filter_map(|t| {
-            let price = t.price?.parse::<f64>().ok()?;
-            let size = t.size?.parse::<f64>().ok()?;
-            let ts = t
-                .timestamp
-                .and_then(|s| {
-                    s.parse::<i64>()
-                        .ok()
-                        .and_then(|n| DateTime::<Utc>::from_timestamp(n, 0))
-                        .or_else(|| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)))
-                })
+            let price = t.get("price")
+                .and_then(|v| v.as_f64())
+                .or_else(|| t.get("price").and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok()))?;
+            let size = t.get("size")
+                .and_then(|v| v.as_f64())
+                .or_else(|| t.get("size").and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok()))
+                .unwrap_or(1.0);
+            let side = t.get("side")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_lowercase());
+            let ts = t.get("timestamp")
+                .and_then(|v| v.as_i64())
+                .and_then(|n| DateTime::<Utc>::from_timestamp(n, 0))
                 .unwrap_or_else(Utc::now);
-            Some((price, size, t.side.map(|s| s.to_lowercase()), ts))
+            Some((price, size, side, ts))
         })
         .collect();
 
     Ok(parsed)
 }
 
-// ── Kalshi ─────────────────────────────────────────────────────────
-
-#[derive(Debug, Default, Deserialize)]
-struct KalshiTradesResponse {
-    #[serde(default)]
-    trades: Vec<KalshiTrade>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KalshiTrade {
-    #[serde(default)]
-    yes_price: Option<i64>,
-    #[serde(default)]
-    count: Option<i64>,
-    #[serde(default)]
-    taker_side: Option<String>,
-    #[serde(default)]
-    created_time: Option<String>,
-}
 
 async fn fetch_kalshi_trades(
     client: &Client,
@@ -291,7 +294,7 @@ pub async fn run_trade_ingestion_loop(pool: PgPool) {
         for market in &markets {
             // Case-insensitive platform match — DB stores "Polymarket"/"Kalshi"
             let fetch_result = match market.platform.to_lowercase().as_str() {
-                "polymarket" => fetch_polymarket_trades(&client, &market.external_id).await,
+                "polymarket" => fetch_polymarket_trades(&client, &market.external_id, &pool).await,
                 "kalshi" => fetch_kalshi_trades(&client, &market.external_id).await,
                 other => {
                     tracing::debug!("Skipping unsupported platform: {}", other);
