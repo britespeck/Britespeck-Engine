@@ -11,7 +11,7 @@
 //!   mod indicators;
 //!   // in router: .merge(indicators::routes())
 //!   // in spawns: tokio::spawn(indicators::run_indicator_loop(api_pool.clone()));
-
+ 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -24,42 +24,42 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::time;
 use uuid::Uuid;
-
+ 
 // ── Response types ─────────────────────────────────────────────────
-
+ 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct MarketIndicators {
     pub id: Uuid,
     pub event_id: Uuid,
     pub computed_at: DateTime<Utc>,
-
+ 
     // Price signals
     pub vwap: Option<f64>,
     pub price_momentum_1h: Option<f64>,
     pub price_momentum_6h: Option<f64>,
     pub price_momentum_24h: Option<f64>,
-
+ 
     // Order flow
     pub book_imbalance: Option<f64>,
     pub spread_pct: Option<f64>,
     pub volume_spike: Option<f64>,
-
+ 
     // Risk
     pub ev_yes: Option<f64>,
     pub ev_no: Option<f64>,
     pub kelly_fraction: Option<f64>,
     pub cross_platform_delta: Option<f64>,
     pub resolution_risk: Option<f64>,
-
+ 
     // Sentiment
     pub open_interest_delta: Option<f64>,
     pub news_sentiment: Option<f64>,
-
+ 
     // Composite
     pub omg_score: Option<f64>,
     pub omg_signal: Option<String>,
 }
-
+ 
 #[derive(Debug, Serialize)]
 pub struct IndicatorsResponse {
     pub event_id: String,
@@ -67,15 +67,15 @@ pub struct IndicatorsResponse {
     pub computed_at: DateTime<Utc>,
     pub data_age_secs: Option<i64>,
 }
-
+ 
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
-
-
+ 
+ 
 // ── OMG Smart Suggestion types ─────────────────────────────────────
-
+ 
 #[derive(Debug, Serialize)]
 pub struct ExitTarget {
     pub price: f64,
@@ -83,7 +83,7 @@ pub struct ExitTarget {
     pub profit_pct: f64,
     pub label: String,
 }
-
+ 
 #[derive(Debug, Serialize)]
 pub struct OmgSuggestion {
     pub event_id: String,
@@ -103,18 +103,18 @@ pub struct OmgSuggestion {
     pub arb_opportunity: bool,
     pub computed_at: DateTime<Utc>,
 }
-
+ 
 // ── Routes ─────────────────────────────────────────────────────────
-
+ 
 pub fn routes() -> Router<PgPool> {
     Router::new()
         .route("/indicators/:event_id", get(get_indicators_handler))
         .route("/indicators/:event_id/compute", post(force_compute_handler))
         .route("/omg_suggestion/:event_id", get(get_omg_suggestion_handler))
 }
-
+ 
 // ── GET /indicators/:event_id ──────────────────────────────────────
-
+ 
 async fn get_indicators_handler(
     State(pool): State<PgPool>,
     Path(event_id): Path<String>,
@@ -127,7 +127,7 @@ async fn get_indicators_handler(
             }),
         )
     })?;
-
+ 
     let row = sqlx::query_as::<_, MarketIndicators>(
         "SELECT id, event_id, computed_at,
                 vwap, price_momentum_1h, price_momentum_6h, price_momentum_24h,
@@ -151,11 +151,11 @@ async fn get_indicators_handler(
             }),
         )
     })?;
-
+ 
     let data_age_secs = row.as_ref().map(|r| {
         (Utc::now() - r.computed_at).num_seconds()
     });
-
+ 
     Ok(Json(IndicatorsResponse {
         event_id: uid.to_string(),
         indicators: row,
@@ -163,9 +163,9 @@ async fn get_indicators_handler(
         data_age_secs,
     }))
 }
-
+ 
 // ── POST /indicators/:event_id/compute ────────────────────────────
-
+ 
 async fn force_compute_handler(
     State(pool): State<PgPool>,
     Path(event_id): Path<String>,
@@ -178,7 +178,7 @@ async fn force_compute_handler(
             }),
         )
     })?;
-
+ 
     match compute_and_persist(&pool, uid).await {
         Ok(ind) => Ok(Json(IndicatorsResponse {
             event_id: uid.to_string(),
@@ -194,14 +194,14 @@ async fn force_compute_handler(
         )),
     }
 }
-
+ 
 // ── Core computation ───────────────────────────────────────────────
-
+ 
 pub async fn compute_and_persist(
     pool: &PgPool,
     event_id: Uuid,
 ) -> anyhow::Result<MarketIndicators> {
-
+ 
     // Run all computations concurrently
     let (
         vwap_res,
@@ -224,7 +224,7 @@ pub async fn compute_and_persist(
         fetch_news_sentiment(pool, event_id),
         compute_volume_spike(pool, event_id),
     );
-
+ 
     let vwap = vwap_res.ok().flatten();
     let (mom_1h, mom_6h, mom_24h) = momentum_res.unwrap_or((None, None, None));
     let (book_imbalance, spread_pct) = book_res.unwrap_or((None, None));
@@ -234,7 +234,7 @@ pub async fn compute_and_persist(
     let open_interest_delta = oi_res.ok().flatten();
     let news_sentiment = sentiment_res.ok().flatten();
     let volume_spike = volume_spike_res.ok().flatten();
-
+ 
     // ── OMG Composite Score ────────────────────────────────────
     // Weighted 0-100 score. Weights sum to 1.0.
     // Higher weight = more influence on the composite.
@@ -249,7 +249,7 @@ pub async fn compute_and_persist(
         resolution_risk,
         spread_pct,
     );
-
+ 
     let omg_signal = omg_score.map(|s| {
         match s as i32 {
             75..=100 => "strong_buy",
@@ -260,11 +260,11 @@ pub async fn compute_and_persist(
         }
         .to_string()
     });
-
+ 
     // ── Persist to market_indicators ───────────────────────────
     let id = Uuid::new_v4();
     let now = Utc::now();
-
+ 
     // Upsert: if we computed within the last minute, update instead of insert
     sqlx::query(
         "INSERT INTO public.market_indicators (
@@ -299,7 +299,7 @@ pub async fn compute_and_persist(
     .bind(omg_signal.clone())
     .execute(pool)
     .await?;
-
+ 
     Ok(MarketIndicators {
         id,
         event_id,
@@ -322,13 +322,13 @@ pub async fn compute_and_persist(
         omg_signal,
     })
 }
-
+ 
 // ── Indicator 1: VWAP ──────────────────────────────────────────────
 // Volume-weighted average price from raw_trades last 24h
-
+ 
 async fn compute_vwap(pool: &PgPool, event_id: Uuid) -> anyhow::Result<Option<f64>> {
     let since = Utc::now() - Duration::hours(24);
-
+ 
     // Look up external_id and clob_token_yes for this event
     let meta: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT external_id, clob_token_yes FROM public.prediction_events WHERE id = $1"
@@ -336,10 +336,10 @@ async fn compute_vwap(pool: &PgPool, event_id: Uuid) -> anyhow::Result<Option<f6
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     let external_id = meta.as_ref().and_then(|(e, _)| e.clone()).unwrap_or_default();
     let clob_token = meta.and_then(|(_, t)| t).unwrap_or_default();
-
+ 
     let row: Option<(Option<f64>,)> = sqlx::query_as(
         "SELECT
             SUM(price * size) / NULLIF(SUM(size), 0) AS vwap
@@ -355,19 +355,19 @@ async fn compute_vwap(pool: &PgPool, event_id: Uuid) -> anyhow::Result<Option<f6
     .bind(since)
     .fetch_optional(pool)
     .await?;
-
+ 
     Ok(row.and_then(|r| r.0))
 }
-
+ 
 // ── Indicator 2: Price Momentum ────────────────────────────────────
 // Rate of change over 1h, 6h, 24h windows from market_history
-
+ 
 async fn compute_price_momentum(
     pool: &PgPool,
     event_id: Uuid,
 ) -> anyhow::Result<(Option<f64>, Option<f64>, Option<f64>)> {
     let now = Utc::now();
-
+ 
     // Get current price and prices at 1h, 6h, 24h ago
     let row: Option<(Option<f64>, Option<f64>, Option<f64>, Option<f64>)> =
         sqlx::query_as(
@@ -395,24 +395,24 @@ async fn compute_price_momentum(
         .bind(now)
         .fetch_optional(pool)
         .await?;
-
+ 
     let Some((current, p1h, p6h, p24h)) = row else {
         return Ok((None, None, None));
     };
-
+ 
     let momentum = |past: Option<f64>| -> Option<f64> {
         match (current, past) {
             (Some(c), Some(p)) if p > 0.0 => Some((c - p) / p * 100.0),
             _ => None,
         }
     };
-
+ 
     Ok((momentum(p1h), momentum(p6h), momentum(p24h)))
 }
-
+ 
 // ── Indicators 4 & 5: Book Imbalance + Spread ─────────────────────
 // From latest orderbook_snapshots snapshot
-
+ 
 async fn compute_book_signals(
     pool: &PgPool,
     event_id: Uuid,
@@ -425,10 +425,10 @@ async fn compute_book_signals(
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     let external_id = meta.as_ref().and_then(|(e, _)| e.clone()).unwrap_or_default();
     let clob_token = meta.and_then(|(_, t)| t).unwrap_or_default();
-
+ 
     // Search using UUID string, external_id (e.g. "polymarket:304265"),
     // and clob_token_yes (the long number used as token_id in orderbook_snapshots)
     let rows: Vec<(String, f64, f64)> = sqlx::query_as(
@@ -445,52 +445,52 @@ async fn compute_book_signals(
     .bind(&clob_token)
     .fetch_all(pool)
     .await?;
-
+ 
     if rows.is_empty() {
         return Ok((None, None));
     }
-
+ 
     let bids: Vec<(f64, f64)> = rows
         .iter()
         .filter(|(s, _, _)| matches!(s.as_str(), "bid" | "buy" | "yes"))
         .map(|(_, p, sz)| (*p, *sz))
         .collect();
-
+ 
     let asks: Vec<(f64, f64)> = rows
         .iter()
         .filter(|(s, _, _)| matches!(s.as_str(), "ask" | "sell" | "no"))
         .map(|(_, p, sz)| (*p, *sz))
         .collect();
-
+ 
     // Book imbalance: (bid_vol - ask_vol) / (bid_vol + ask_vol)
     // Range: -1.0 (all asks) to +1.0 (all bids)
     let bid_vol: f64 = bids.iter().map(|(_, sz)| sz).sum();
     let ask_vol: f64 = asks.iter().map(|(_, sz)| sz).sum();
     let total = bid_vol + ask_vol;
-
+ 
     let book_imbalance = if total > 0.0 {
         Some((bid_vol - ask_vol) / total)
     } else {
         None
     };
-
+ 
     // Spread: best ask - best bid, as % of midpoint
     let best_bid = bids.iter().map(|(p, _)| *p).fold(f64::MIN, f64::max);
     let best_ask = asks.iter().map(|(p, _)| *p).fold(f64::MAX, f64::min);
-
+ 
     let spread_pct = if best_bid > 0.0 && best_ask < f64::MAX && best_ask > best_bid {
         let mid = (best_bid + best_ask) / 2.0;
         Some((best_ask - best_bid) / mid * 100.0)
     } else {
         None
     };
-
+ 
     Ok((book_imbalance, spread_pct))
 }
-
+ 
 // ── Indicator 7: EV + Kelly ────────────────────────────────────────
 // Uses current market price and treats 50% as AI baseline if no signal
-
+ 
 async fn compute_ev_kelly(
     pool: &PgPool,
     event_id: Uuid,
@@ -505,13 +505,13 @@ async fn compute_ev_kelly(
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     let Some((market_price, _sentiment)) = row else {
         return Ok((None, None, None));
     };
-
+ 
     let market_price = market_price.clamp(0.001, 0.999);
-
+ 
     // Check if there's an existing trade signal with an AI probability
     let ai_prob_row: Option<(f64,)> = sqlx::query_as(
         "SELECT ai_probability
@@ -523,30 +523,30 @@ async fn compute_ev_kelly(
     .bind(event_id.to_string())
     .fetch_optional(pool)
     .await?;
-
+ 
     // Use most recent AI probability, or fall back to 50% (neutral)
     let ai_prob = ai_prob_row
         .map(|(p,)| p)
         .unwrap_or(0.5)
         .clamp(0.001, 0.999);
-
+ 
     // EV calculation (same as ev_engine.rs)
     let ev_yes = (ai_prob * (1.0 - market_price)) - ((1.0 - ai_prob) * market_price);
     let ev_no = ((1.0 - ai_prob) * market_price) - (ai_prob * (1.0 - market_price));
-
+ 
     // Kelly fraction for the better side
     let b_yes = (1.0 - market_price) / market_price;
     let kelly_yes = ((ai_prob * b_yes) - (1.0 - ai_prob)) / b_yes;
     let b_no = market_price / (1.0 - market_price);
     let kelly_no = (((1.0 - ai_prob) * b_no) - ai_prob) / b_no;
     let kelly = kelly_yes.max(kelly_no).clamp(0.0, 0.25) / 4.0; // quarter kelly
-
+ 
     Ok((Some(ev_yes), Some(ev_no), Some(kelly)))
 }
-
+ 
 // ── Indicator 8: Cross-Platform Delta ─────────────────────────────
 // Price difference between Kalshi and Polymarket for same event title
-
+ 
 async fn compute_cross_platform_delta(
     pool: &PgPool,
     event_id: Uuid,
@@ -561,18 +561,18 @@ async fn compute_cross_platform_delta(
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     let Some((title, platform, this_price)) = row else {
         return Ok(None);
     };
-
+ 
     // Find the same event on the other platform by title similarity
     let other_platform = if platform.to_lowercase() == "kalshi" {
         "Polymarket"
     } else {
         "Kalshi"
     };
-
+ 
     // Try pg_trgm similarity first, fall back to LIKE if extension not enabled
     let other: Option<(f64,)> = match sqlx::query_as(
         "SELECT odds
@@ -611,7 +611,7 @@ async fn compute_cross_platform_delta(
             .unwrap_or(None)
         }
     };
-
+ 
     Ok(other.map(|(other_price,)| {
         if platform.to_lowercase() == "kalshi" {
             this_price - other_price  // positive = kalshi higher
@@ -620,11 +620,11 @@ async fn compute_cross_platform_delta(
         }
     }))
 }
-
+ 
 // ── Indicator 9: Resolution Risk Score ────────────────────────────
 // 0.0 = low risk, 1.0 = high risk
 // Factors: days to resolution, category risk, price extremity
-
+ 
 async fn compute_resolution_risk(
     pool: &PgPool,
     event_id: Uuid,
@@ -638,13 +638,13 @@ async fn compute_resolution_risk(
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     let Some((price, category, end_date)) = row else {
         return Ok(None);
     };
-
+ 
     let mut risk: f64 = 0.0;
-
+ 
     // Factor 1: Days to resolution (closer = higher risk of surprise)
     if let Some(end) = end_date {
         let days_left = (end - Utc::now()).num_days();
@@ -659,7 +659,7 @@ async fn compute_resolution_risk(
     } else {
         risk += 0.15; // unknown end date = moderate risk
     }
-
+ 
     // Factor 2: Category risk profile
     let cat_lower = category.as_deref().unwrap_or("").to_lowercase();
     let category_risk = if cat_lower.contains("crypto") || cat_lower.contains("bitcoin") {
@@ -674,7 +674,7 @@ async fn compute_resolution_risk(
         0.15 // general
     };
     risk += category_risk;
-
+ 
     // Factor 3: Price extremity (very cheap or very expensive = riskier)
     // Markets at 5¢ or 95¢ have high resolution risk (binary cliff)
     let price_risk = if price < 0.05 || price > 0.95 {
@@ -687,14 +687,14 @@ async fn compute_resolution_risk(
         0.02
     };
     risk += price_risk;
-
+ 
     Ok(Some(risk.min(1.0)))
 }
-
+ 
 // ── Indicator 11: Open Interest Delta ─────────────────────────────
 // % change in volume_24h vs 24h ago (proxy for OI since we don't
 // have direct OI tracking yet)
-
+ 
 async fn compute_open_interest_delta(
     pool: &PgPool,
     event_id: Uuid,
@@ -706,7 +706,7 @@ async fn compute_open_interest_delta(
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     // Get yesterday's volume from market_history snapshots
     // volume_24h is written into market_history as volume_24h column
     let hist_row: Option<(Option<f64>,)> = sqlx::query_as(
@@ -720,10 +720,10 @@ async fn compute_open_interest_delta(
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     let current_vol = vol_row.and_then(|(v,)| v);
     let past_vol = hist_row.and_then(|(v,)| v);
-
+ 
     match (current_vol, past_vol) {
         (Some(curr), Some(past)) if past > 0.0 => {
             Ok(Some((curr - past) / past * 100.0))
@@ -731,9 +731,9 @@ async fn compute_open_interest_delta(
         _ => Ok(None),
     }
 }
-
+ 
 // ── Volume Spike (from alpha_signals) ─────────────────────────────
-
+ 
 async fn compute_volume_spike(
     pool: &PgPool,
     event_id: Uuid,
@@ -750,12 +750,12 @@ async fn compute_volume_spike(
     .bind(event_id.to_string())
     .fetch_optional(pool)
     .await?;
-
+ 
     Ok(row.map(|(m,)| m))
 }
-
+ 
 // ── News Sentiment ─────────────────────────────────────────────────
-
+ 
 async fn fetch_news_sentiment(
     pool: &PgPool,
     event_id: Uuid,
@@ -768,14 +768,14 @@ async fn fetch_news_sentiment(
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     Ok(row.and_then(|(s,)| s))
 }
-
+ 
 // ── OMG Composite Score ────────────────────────────────────────────
 // Weighted combination of all signals → 0 to 100
 // 50 = neutral, >65 = bullish, <35 = bearish
-
+ 
 fn compute_omg_composite(
     ev_yes: Option<f64>,
     kelly: Option<f64>,
@@ -798,17 +798,17 @@ fn compute_omg_composite(
     const W_SENTIMENT: f64 = 0.08;
     const W_RISK:      f64 = 0.05; // inverted (lower risk = higher score)
     const W_SPREAD:    f64 = 0.02; // inverted (tighter spread = higher score)
-
+ 
     let mut score = 0.0f64;
     let mut total_weight = 0.0f64;
-
+ 
     // EV: normalize from [-1, 1] → [0, 100]
     if let Some(ev) = ev_yes {
         let normalized = ((ev + 1.0) / 2.0 * 100.0).clamp(0.0, 100.0);
         score += normalized * W_EV;
         total_weight += W_EV;
     }
-
+ 
     // Kelly: normalize from [0, 0.25] → [0, 100]
     if let Some(k) = kelly {
         let normalized = (k / 0.25 * 100.0).clamp(0.0, 100.0);
@@ -817,21 +817,21 @@ fn compute_omg_composite(
         score += shifted * W_KELLY;
         total_weight += W_KELLY;
     }
-
+ 
     // Book imbalance: from [-1, 1] → [0, 100]
     if let Some(bi) = book_imbalance {
         let normalized = ((bi + 1.0) / 2.0 * 100.0).clamp(0.0, 100.0);
         score += normalized * W_BOOK;
         total_weight += W_BOOK;
     }
-
+ 
     // Price momentum: from [-50%, +50%] → [0, 100]
     if let Some(mom) = price_momentum_24h {
         let normalized = ((mom + 50.0) / 100.0 * 100.0).clamp(0.0, 100.0);
         score += normalized * W_MOMENTUM;
         total_weight += W_MOMENTUM;
     }
-
+ 
     // Volume spike: >2x = bullish signal, normalize [0, 5x] → [50, 100]
     if let Some(vs) = volume_spike {
         let normalized = if vs >= 1.0 {
@@ -842,7 +842,7 @@ fn compute_omg_composite(
         score += normalized * W_VOLUME;
         total_weight += W_VOLUME;
     }
-
+ 
     // Cross-platform delta: small delta = fair price, large = arb opportunity
     // |delta| > 5 cents is significant
     if let Some(cpd) = cross_platform_delta {
@@ -852,40 +852,40 @@ fn compute_omg_composite(
         score += normalized * W_CROSS;
         total_weight += W_CROSS;
     }
-
+ 
     // News sentiment: already [-1, 1] → [0, 100]
     if let Some(ns) = news_sentiment {
         let normalized = ((ns + 1.0) / 2.0 * 100.0).clamp(0.0, 100.0);
         score += normalized * W_SENTIMENT;
         total_weight += W_SENTIMENT;
     }
-
+ 
     // Resolution risk: INVERTED — lower risk = higher score
     if let Some(rr) = resolution_risk {
         let normalized = ((1.0 - rr) * 100.0).clamp(0.0, 100.0);
         score += normalized * W_RISK;
         total_weight += W_RISK;
     }
-
+ 
     // Spread: INVERTED — tighter spread = higher score (more liquid)
     if let Some(sp) = spread_pct {
         let normalized = ((1.0 - (sp / 20.0).min(1.0)) * 100.0).clamp(0.0, 100.0);
         score += normalized * W_SPREAD;
         total_weight += W_SPREAD;
     }
-
+ 
     if total_weight < 0.10 {
         // Not enough signals to compute a meaningful composite
         return None;
     }
-
+ 
     // Normalize by actual weight used (handles missing signals gracefully)
     Some((score / total_weight).clamp(0.0, 100.0))
 }
-
-
+ 
+ 
 // ── GET /omg_suggestion/:event_id ─────────────────────────────────
-
+ 
 async fn get_omg_suggestion_handler(
     State(pool): State<PgPool>,
     Path(event_id): Path<String>,
@@ -898,7 +898,7 @@ async fn get_omg_suggestion_handler(
             }),
         )
     })?;
-
+ 
     match compute_omg_suggestion(&pool, uid).await {
         Ok(suggestion) => Ok(Json(suggestion)),
         Err(e) => Err((
@@ -909,7 +909,7 @@ async fn get_omg_suggestion_handler(
         )),
     }
 }
-
+ 
 async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result<OmgSuggestion> {
     // Get latest indicators
     let ind = sqlx::query_as::<_, MarketIndicators>(
@@ -927,7 +927,7 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     // Get current market price and metadata
     let meta: Option<(f64, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT odds, title, platform
@@ -937,14 +937,14 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
-
+ 
     let (market_price, title, platform) = meta
         .unwrap_or((0.5, Some("Unknown".to_string()), Some("Unknown".to_string())));
     let title = title.unwrap_or_default();
-    let platform = platform.unwrap_or_default();
+    let _platform = platform.unwrap_or_default();
     let price = market_price.clamp(0.001, 0.999);
     let price_cents = (price * 100.0).round() as i64;
-
+ 
     // Extract indicator values
     let ev_yes = ind.as_ref().and_then(|i| i.ev_yes).unwrap_or(0.0);
     let kelly = ind.as_ref().and_then(|i| i.kelly_fraction).unwrap_or(0.0);
@@ -952,10 +952,10 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
     let omg_signal = ind.as_ref()
         .and_then(|i| i.omg_signal.clone())
         .unwrap_or_else(|| "hold".to_string());
-
+ 
     // ── Detect signal type ─────────────────────────────────────
     let arb_opportunity = cross_delta.map(|d| d.abs() > 0.03).unwrap_or(false);
-
+ 
     let signal = if arb_opportunity {
         "arb_opportunity"
     } else if price < 0.20 && ev_yes > 0.03 {
@@ -969,7 +969,7 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
     } else {
         "hold"
     };
-
+ 
     let action = match signal {
         "arb_opportunity" => {
             if cross_delta.unwrap_or(0.0) > 0.0 {
@@ -982,7 +982,7 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
         "avoid" => "AVOID".to_string(),
         _ => "WAIT".to_string(),
     };
-
+ 
     // ── Exit targets ───────────────────────────────────────────
     let exit_targets = if price < 0.50 {
         // Underdog — momentum exit strategy
@@ -1029,16 +1029,16 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
             },
         ]
     };
-
+ 
     // ── Stop loss ──────────────────────────────────────────────
     let stop_loss = (price * 0.50).max(0.01);
     let stop_loss_cents = (stop_loss * 100.0).round() as i64;
-
+ 
     // ── Kelly sizing on $100 bankroll ──────────────────────────
     let kelly_size_usd = (kelly * 100.0).max(0.0).min(25.0);
     // Round to nearest dollar
     let kelly_size_usd = (kelly_size_usd * 100.0).round() / 100.0;
-
+ 
     // ── Win-once-in math ───────────────────────────────────────
     // How many bets until 50%+ chance of winning at least once
     let win_once_in = if price > 0.01 {
@@ -1047,13 +1047,13 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
     } else {
         100
     };
-
+ 
     // ── Math summary ───────────────────────────────────────────
     let cost_per_bet = (price * 100.0 * kelly_size_usd / 100.0 * 100.0).round() / 100.0;
-    let payout = kelly_size_usd;
+    let _payout = kelly_size_usd;
     let profit_if_win = ((1.0 - price) * kelly_size_usd / price * 100.0).round() / 100.0;
     let total_risk = cost_per_bet * win_once_in as f64;
-
+ 
     let math_summary = format!(
         "{} bets at ${:.2} = ${:.2} total risk. Win once = ${:.2} profit. Net: +${:.2} even losing {} of {}.",
         win_once_in,
@@ -1064,7 +1064,7 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
         win_once_in - 1,
         win_once_in
     );
-
+ 
     // ── Reasoning ──────────────────────────────────────────────
     let ev_pct = (ev_yes * 100.0).abs();
     let reasoning = match signal {
@@ -1089,7 +1089,7 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
             price * 100.0
         ),
     };
-
+ 
     Ok(OmgSuggestion {
         event_id: event_id.to_string(),
         signal: signal.to_string(),
@@ -1109,9 +1109,9 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
         computed_at: Utc::now(),
     })
 }
-
+ 
 // ── UUID resolver ──────────────────────────────────────────────────
-
+ 
 async fn parse_or_lookup_uuid(pool: &PgPool, param: &str) -> Option<Uuid> {
     if let Ok(uid) = Uuid::parse_str(param) {
         return Some(uid);
@@ -1127,17 +1127,17 @@ async fn parse_or_lookup_uuid(pool: &PgPool, param: &str) -> Option<Uuid> {
     .flatten()
     .map(|(id,)| id)
 }
-
+ 
 // ── Background loop ────────────────────────────────────────────────
-
+ 
 pub async fn run_indicator_loop(pool: PgPool) {
     tracing::info!("📊 Starting OMG indicator computation loop (60s interval)");
-
+ 
     let mut interval = tokio::time::interval(time::Duration::from_secs(60));
-
+ 
     loop {
         interval.tick().await;
-
+ 
         // Get active markets with recent price activity
         let active: Vec<(Uuid,)> = match sqlx::query_as(
             "SELECT id
@@ -1157,17 +1157,17 @@ pub async fn run_indicator_loop(pool: PgPool) {
                 continue;
             }
         };
-
+ 
         if active.is_empty() {
             tracing::debug!("Indicator loop: no active markets");
             continue;
         }
-
+ 
         tracing::info!("📊 Computing indicators for {} markets", active.len());
-
+ 
         let mut computed = 0usize;
         let mut errors = 0usize;
-
+ 
         for (event_id,) in &active {
             match compute_and_persist(&pool, *event_id).await {
                 Ok(_) => computed += 1,
@@ -1181,7 +1181,7 @@ pub async fn run_indicator_loop(pool: PgPool) {
             // Small delay to avoid DB saturation
             tokio::time::sleep(time::Duration::from_millis(50)).await;
         }
-
+ 
         tracing::info!(
             "✅ Indicators computed: {} success, {} errors",
             computed, errors

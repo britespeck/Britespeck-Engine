@@ -1,14 +1,14 @@
 //! Raw trade ingestion from Polymarket CLOB and Kalshi APIs.
-
+ 
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
-
+ 
 // ── Types ──────────────────────────────────────────────────────────
-
+ 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RawTrade {
     pub id: Uuid,
@@ -20,14 +20,14 @@ pub struct RawTrade {
     pub trade_timestamp: DateTime<Utc>,
     pub ingested_at: DateTime<Utc>,
 }
-
+ 
 #[derive(Debug, Clone)]
 struct ActiveMarket {
     event_id: String,
     platform: String,
     external_id: String,
 }
-
+ 
 /// Strip our internal "platform:" prefix to get the upstream API id.
 /// e.g. "polymarket:100371" → "100371", "kalshi:KXPRES-2024-DJT" → "KXPRES-2024-DJT"
 fn strip_platform_prefix(external_id: &str) -> &str {
@@ -39,9 +39,9 @@ fn strip_platform_prefix(external_id: &str) -> &str {
     }
     external_id
 }
-
+ 
 // ── Polymarket CLOB ────────────────────────────────────────────────
-
+ 
 #[derive(Debug, Deserialize)]
 struct PolymarketTrade {
     #[serde(default)]
@@ -53,7 +53,7 @@ struct PolymarketTrade {
     #[serde(default, alias = "match_time", alias = "timestamp")]
     timestamp: Option<String>,
 }
-
+ 
 async fn fetch_polymarket_trades(
     client: &Client,
     market_id: &str,
@@ -69,30 +69,30 @@ async fn fetch_polymarket_trades(
     .fetch_optional(pool)
     .await
     .unwrap_or(None);
-
+ 
     let token_id = token.and_then(|(t,)| t).unwrap_or_default();
-
+ 
     if token_id.is_empty() {
         return Ok(vec![]);
     }
-
+ 
     let url = format!(
         "https://clob.polymarket.com/trades?token_id={}&limit=50",
         token_id
     );
-
+ 
     let resp = client
         .get(&url)
         .timeout(Duration::from_secs(8))
         .send()
         .await?;
-
+ 
     if !resp.status().is_success() {
         anyhow::bail!("Polymarket token {} returned {}", token_id, resp.status());
     }
-
+ 
     let trades: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
-
+ 
     let parsed = trades
         .into_iter()
         .filter_map(|t| {
@@ -115,11 +115,17 @@ async fn fetch_polymarket_trades(
             Some((price, size, side, ts))
         })
         .collect();
-
+ 
     Ok(parsed)
 }
-
-
+ 
+ 
+#[derive(Debug, Default, Deserialize)]
+struct KalshiTradesResponse {
+    #[serde(default)]
+    trades: Vec<KalshiTrade>,
+}
+ 
 async fn fetch_kalshi_trades(
     client: &Client,
     ticker: &str,
@@ -129,19 +135,19 @@ async fn fetch_kalshi_trades(
         "https://api.elections.kalshi.com/trade-api/v2/markets/trades?ticker={}&limit=50",
         upstream_ticker
     );
-
+ 
     let resp = client
         .get(&url)
         .timeout(Duration::from_secs(8))
         .send()
         .await?;
-
+ 
     if !resp.status().is_success() {
         anyhow::bail!("Kalshi {} returned {}", upstream_ticker, resp.status());
     }
-
+ 
     let body: KalshiTradesResponse = resp.json().await.unwrap_or_default();
-
+ 
     let parsed = body
         .trades
         .into_iter()
@@ -150,18 +156,18 @@ async fn fetch_kalshi_trades(
             let size = t.count? as f64;
             let ts = t
                 .created_time
-                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .and_then(|s| DateTime::parse_from_rfc3339(s.as_str()).ok())
                 .map(|d| d.with_timezone(&Utc))
                 .unwrap_or_else(Utc::now);
             Some((price, size, t.taker_side.map(|s| s.to_lowercase()), ts))
         })
         .collect();
-
+ 
     Ok(parsed)
 }
-
+ 
 // ── Persistence ────────────────────────────────────────────────────
-
+ 
 async fn persist_trades(
     pool: &PgPool,
     market: &ActiveMarket,
@@ -170,9 +176,9 @@ async fn persist_trades(
     if trades.is_empty() {
         return Ok(0);
     }
-
+ 
     let mut inserted = 0usize;
-
+ 
     for (price, size, side, ts) in trades {
         let result = sqlx::query(
             "INSERT INTO raw_trades
@@ -190,15 +196,15 @@ async fn persist_trades(
         .bind(Utc::now())
         .execute(pool)
         .await?;
-
+ 
         inserted += result.rows_affected() as usize;
     }
-
+ 
     Ok(inserted)
 }
-
+ 
 // ── Public query API (used by endpoints.rs) ────────────────────────
-
+ 
 /// Query persisted trades for an event, optionally filtered by `since` timestamp.
 pub async fn get_trades(
     pool: &PgPool,
@@ -232,12 +238,12 @@ pub async fn get_trades(
         .fetch_all(pool)
         .await?
     };
-
+ 
     Ok(rows)
 }
-
+ 
 // ── Active markets selector ────────────────────────────────────────
-
+ 
 async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<ActiveMarket>> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT external_id, platform, external_id
@@ -250,7 +256,7 @@ async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<ActiveMarket>> 
     )
     .fetch_all(pool)
     .await?;
-
+ 
     Ok(rows
         .into_iter()
         .map(|(event_id, platform, external_id)| ActiveMarket {
@@ -260,22 +266,22 @@ async fn get_active_markets(pool: &PgPool) -> anyhow::Result<Vec<ActiveMarket>> 
         })
         .collect())
 }
-
+ 
 // ── Main loop ──────────────────────────────────────────────────────
-
+ 
 pub async fn run_trade_ingestion_loop(pool: PgPool) {
     tracing::info!("📥 Starting trade ingestion loop");
-
+ 
     let client = Client::builder()
         .user_agent("Britespeck-Engine/1.0")
         .build()
         .expect("reqwest client");
-
+ 
     let mut interval = tokio::time::interval(Duration::from_secs(60));
-
+ 
     loop {
         interval.tick().await;
-
+ 
         let markets = match get_active_markets(&pool).await {
             Ok(m) => m,
             Err(e) => {
@@ -283,14 +289,14 @@ pub async fn run_trade_ingestion_loop(pool: PgPool) {
                 continue;
             }
         };
-
+ 
         if markets.is_empty() {
             tracing::debug!("Trade loop: no active markets, skipping cycle");
             continue;
         }
-
+ 
         let mut total_ingested = 0usize;
-
+ 
         for market in &markets {
             // Case-insensitive platform match — DB stores "Polymarket"/"Kalshi"
             let fetch_result = match market.platform.to_lowercase().as_str() {
@@ -301,7 +307,7 @@ pub async fn run_trade_ingestion_loop(pool: PgPool) {
                     continue;
                 }
             };
-
+ 
             match fetch_result {
                 Ok(trades) if !trades.is_empty() => match persist_trades(&pool, market, &trades).await {
                     Ok(n) => total_ingested += n,
@@ -313,10 +319,10 @@ pub async fn run_trade_ingestion_loop(pool: PgPool) {
                     market.event_id, market.platform, e
                 ),
             }
-
+ 
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
-
+ 
         if total_ingested > 0 {
             tracing::info!("✅ Ingested {} new trades this cycle", total_ingested);
         }
