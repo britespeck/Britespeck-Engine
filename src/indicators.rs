@@ -73,12 +73,44 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+
+// ── OMG Smart Suggestion types ─────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ExitTarget {
+    pub price: f64,
+    pub sell_pct: f64,
+    pub profit_pct: f64,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OmgSuggestion {
+    pub event_id: String,
+    pub signal: String,           // "underdog_value", "strong_buy", "arb_opportunity", "hold", "avoid"
+    pub action: String,           // "BUY YES", "BUY NO", "WAIT", "AVOID"
+    pub entry_price: f64,
+    pub entry_price_cents: i64,
+    pub exit_targets: Vec<ExitTarget>,
+    pub stop_loss: f64,
+    pub stop_loss_cents: i64,
+    pub ev_percent: f64,
+    pub kelly_size_usd: f64,      // suggested size on $100 bankroll
+    pub win_once_in: i64,         // win 1 in X tries = profitable
+    pub math_summary: String,     // "5 bets at $14 = $70 risk. Win once = $86 profit."
+    pub reasoning: String,
+    pub cross_platform_delta: Option<f64>,
+    pub arb_opportunity: bool,
+    pub computed_at: DateTime<Utc>,
+}
+
 // ── Routes ─────────────────────────────────────────────────────────
 
 pub fn routes() -> Router<PgPool> {
     Router::new()
         .route("/indicators/:event_id", get(get_indicators_handler))
         .route("/indicators/:event_id/compute", post(force_compute_handler))
+        .route("/omg_suggestion/:event_id", get(get_omg_suggestion_handler))
 }
 
 // ── GET /indicators/:event_id ──────────────────────────────────────
@@ -849,6 +881,233 @@ fn compute_omg_composite(
 
     // Normalize by actual weight used (handles missing signals gracefully)
     Some((score / total_weight).clamp(0.0, 100.0))
+}
+
+
+// ── GET /omg_suggestion/:event_id ─────────────────────────────────
+
+async fn get_omg_suggestion_handler(
+    State(pool): State<PgPool>,
+    Path(event_id): Path<String>,
+) -> Result<Json<OmgSuggestion>, (StatusCode, Json<ErrorResponse>)> {
+    let uid = parse_or_lookup_uuid(&pool, &event_id).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Event not found: {}", event_id),
+            }),
+        )
+    })?;
+
+    match compute_omg_suggestion(&pool, uid).await {
+        Ok(suggestion) => Ok(Json(suggestion)),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Suggestion compute failed: {}", e),
+            }),
+        )),
+    }
+}
+
+async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result<OmgSuggestion> {
+    // Get latest indicators
+    let ind = sqlx::query_as::<_, MarketIndicators>(
+        "SELECT id, event_id, computed_at,
+                vwap, price_momentum_1h, price_momentum_6h, price_momentum_24h,
+                book_imbalance, spread_pct, volume_spike,
+                ev_yes, ev_no, kelly_fraction, cross_platform_delta, resolution_risk,
+                open_interest_delta, news_sentiment,
+                omg_score, omg_signal
+         FROM public.market_indicators
+         WHERE event_id = $1
+         ORDER BY computed_at DESC
+         LIMIT 1",
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await?;
+
+    // Get current market price and metadata
+    let meta: Option<(f64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT odds, title, platform
+         FROM public.prediction_events
+         WHERE id = $1 LIMIT 1",
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let (market_price, title, platform) = meta
+        .unwrap_or((0.5, Some("Unknown".to_string()), Some("Unknown".to_string())));
+    let title = title.unwrap_or_default();
+    let platform = platform.unwrap_or_default();
+    let price = market_price.clamp(0.001, 0.999);
+    let price_cents = (price * 100.0).round() as i64;
+
+    // Extract indicator values
+    let ev_yes = ind.as_ref().and_then(|i| i.ev_yes).unwrap_or(0.0);
+    let kelly = ind.as_ref().and_then(|i| i.kelly_fraction).unwrap_or(0.0);
+    let cross_delta = ind.as_ref().and_then(|i| i.cross_platform_delta);
+    let omg_signal = ind.as_ref()
+        .and_then(|i| i.omg_signal.clone())
+        .unwrap_or_else(|| "hold".to_string());
+
+    // ── Detect signal type ─────────────────────────────────────
+    let arb_opportunity = cross_delta.map(|d| d.abs() > 0.03).unwrap_or(false);
+
+    let signal = if arb_opportunity {
+        "arb_opportunity"
+    } else if price < 0.20 && ev_yes > 0.03 {
+        "underdog_value"
+    } else if omg_signal == "strong_buy" || ev_yes > 0.15 {
+        "strong_buy"
+    } else if omg_signal == "buy" || ev_yes > 0.05 {
+        "value_buy"
+    } else if omg_signal == "sell" || ev_yes < -0.10 {
+        "avoid"
+    } else {
+        "hold"
+    };
+
+    let action = match signal {
+        "arb_opportunity" => {
+            if cross_delta.unwrap_or(0.0) > 0.0 {
+                format!("BUY YES on Polymarket, SELL on Kalshi")
+            } else {
+                format!("BUY YES on Kalshi, SELL on Polymarket")
+            }
+        }
+        "underdog_value" | "strong_buy" | "value_buy" => "BUY YES".to_string(),
+        "avoid" => "AVOID".to_string(),
+        _ => "WAIT".to_string(),
+    };
+
+    // ── Exit targets ───────────────────────────────────────────
+    let exit_targets = if price < 0.50 {
+        // Underdog — momentum exit strategy
+        let target1 = (price * 1.75).min(0.95);
+        let target2 = (price * 2.50).min(0.95);
+        let profit1 = ((target1 - price) / price * 100.0).round();
+        let profit2 = ((target2 - price) / price * 100.0).round();
+        vec![
+            ExitTarget {
+                price: target1,
+                sell_pct: 40.0,
+                profit_pct: profit1,
+                label: format!("Take profit 1 — sell 40% at {:.0}¢ (+{:.0}%)", target1 * 100.0, profit1),
+            },
+            ExitTarget {
+                price: target2,
+                sell_pct: 40.0,
+                profit_pct: profit2,
+                label: format!("Take profit 2 — sell 40% at {:.0}¢ (+{:.0}%)", target2 * 100.0, profit2),
+            },
+            ExitTarget {
+                price: 1.0,
+                sell_pct: 20.0,
+                profit_pct: ((1.0 - price) / price * 100.0).round(),
+                label: "Hold 20% for full payout if it wins".to_string(),
+            },
+        ]
+    } else {
+        // Favorite — tighter exits
+        let target1 = (price * 1.10).min(0.98);
+        let profit1 = ((target1 - price) / price * 100.0).round();
+        vec![
+            ExitTarget {
+                price: target1,
+                sell_pct: 60.0,
+                profit_pct: profit1,
+                label: format!("Take profit — sell 60% at {:.0}¢ (+{:.0}%)", target1 * 100.0, profit1),
+            },
+            ExitTarget {
+                price: 1.0,
+                sell_pct: 40.0,
+                profit_pct: ((1.0 - price) / price * 100.0).round(),
+                label: "Hold 40% for full payout".to_string(),
+            },
+        ]
+    };
+
+    // ── Stop loss ──────────────────────────────────────────────
+    let stop_loss = (price * 0.50).max(0.01);
+    let stop_loss_cents = (stop_loss * 100.0).round() as i64;
+
+    // ── Kelly sizing on $100 bankroll ──────────────────────────
+    let kelly_size_usd = (kelly * 100.0).max(0.0).min(25.0);
+    // Round to nearest dollar
+    let kelly_size_usd = (kelly_size_usd * 100.0).round() / 100.0;
+
+    // ── Win-once-in math ───────────────────────────────────────
+    // How many bets until 50%+ chance of winning at least once
+    let win_once_in = if price > 0.01 {
+        let n = (0.5_f64.ln() / (1.0 - price).ln()).ceil() as i64;
+        n.max(1).min(100)
+    } else {
+        100
+    };
+
+    // ── Math summary ───────────────────────────────────────────
+    let cost_per_bet = (price * 100.0 * kelly_size_usd / 100.0 * 100.0).round() / 100.0;
+    let payout = kelly_size_usd;
+    let profit_if_win = ((1.0 - price) * kelly_size_usd / price * 100.0).round() / 100.0;
+    let total_risk = cost_per_bet * win_once_in as f64;
+
+    let math_summary = format!(
+        "{} bets at ${:.2} = ${:.2} total risk. Win once = ${:.2} profit. Net: +${:.2} even losing {} of {}.",
+        win_once_in,
+        cost_per_bet,
+        total_risk,
+        profit_if_win,
+        profit_if_win - (total_risk - cost_per_bet),
+        win_once_in - 1,
+        win_once_in
+    );
+
+    // ── Reasoning ──────────────────────────────────────────────
+    let ev_pct = (ev_yes * 100.0).abs();
+    let reasoning = match signal {
+        "underdog_value" => format!(
+            "Market prices {} at {:.0}¢ ({:.0}% implied probability).              True probability estimated higher based on EV analysis (+{:.1}% edge).              Underdog momentum strategy: buy cheap, exit at 1.75x-2.5x on any price spike.              You don't need them to win — just need the price to move.              Even scoring first before losing still generates profit if you exit at target 1.",
+            title, price * 100.0, price * 100.0, ev_pct
+        ),
+        "arb_opportunity" => format!(
+            "Cross-platform price gap detected: {:.1}¢ difference between Kalshi and Polymarket              for the same event. Buy the cheaper side, the market will converge.              Guaranteed profit after fees if both sides fill.",
+            cross_delta.unwrap_or(0.0).abs() * 100.0
+        ),
+        "strong_buy" => format!(
+            "Strong positive EV detected: +{:.1}% edge over market price.              OMG composite score confirms bullish signal.              Kelly fraction suggests {:.1}% of bankroll.",
+            ev_pct, kelly * 100.0
+        ),
+        "avoid" => format!(
+            "Negative EV detected: {:.1}% disadvantage at current price.              Market is overpriced relative to true probability.              Wait for better entry or skip this contract.",
+            ev_pct
+        ),
+        _ => format!(
+            "No strong edge detected at current price of {:.0}¢.              EV is near zero — market is fairly priced.              Wait for a price move or better opportunity.",
+            price * 100.0
+        ),
+    };
+
+    Ok(OmgSuggestion {
+        event_id: event_id.to_string(),
+        signal: signal.to_string(),
+        action,
+        entry_price: price,
+        entry_price_cents: price_cents,
+        exit_targets,
+        stop_loss,
+        stop_loss_cents,
+        ev_percent: ev_yes * 100.0,
+        kelly_size_usd,
+        win_once_in,
+        math_summary,
+        reasoning,
+        cross_platform_delta: cross_delta,
+        arb_opportunity,
+        computed_at: Utc::now(),
+    })
 }
 
 // ── UUID resolver ──────────────────────────────────────────────────
