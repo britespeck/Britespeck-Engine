@@ -10,7 +10,8 @@ mod market_history;
 mod fetchers;
 mod orderbook;
 mod indicators;
-
+mod live_stats;
+ 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
 use crate::fetcher::MarketFetcher;
@@ -24,7 +25,7 @@ use tower_http::compression::CompressionLayer;
 use serde::{Serialize, Deserialize};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-
+ 
 #[derive(Serialize, sqlx::FromRow)]
 struct PredictionEvent {
     id: uuid::Uuid,
@@ -44,25 +45,25 @@ struct PredictionEvent {
     sentiment_score: Option<f64>,
     clob_token_yes: Option<String>,
 }
-
+ 
 #[derive(Serialize, sqlx::FromRow)]
 struct IndexHistoryEntry {
     value: f64,
     market_count: i32,
     timestamp: chrono::DateTime<chrono::Utc>,
 }
-
+ 
 #[derive(Deserialize)]
 struct BacktestParams {
     rsi: f64,
     days: i32,
 }
-
+ 
 #[derive(Deserialize)]
 struct PatchIconBody {
     icon_url: String,
 }
-
+ 
 async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
     let rows = sqlx::query_as::<_, PredictionEvent>(
         "SELECT id, title, platform, odds, category, status, icon_url, external_id,
@@ -86,7 +87,7 @@ async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<Predictio
     println!("📤 GET /prediction_events returning {} rows", rows.len());
     Json(rows)
 }
-
+ 
 async fn get_backtest(
     State(pool): State<sqlx::PgPool>,
     Query(params): Query<BacktestParams>
@@ -101,7 +102,7 @@ async fn get_backtest(
     });
     Json(res)
 }
-
+ 
 async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHistoryEntry>> {
     let rows = sqlx::query_as::<_, IndexHistoryEntry>(
         "SELECT value, market_count, timestamp FROM public.index_history ORDER BY timestamp DESC LIMIT 100"
@@ -114,7 +115,7 @@ async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHi
     });
     Json(rows)
 }
-
+ 
 async fn patch_event_icon(
     State(pool): State<sqlx::PgPool>,
     Path(id): Path<String>,
@@ -127,7 +128,7 @@ async fn patch_event_icon(
     .bind(&id)
     .execute(&pool)
     .await;
-
+ 
     match result {
         Ok(r) => {
             if r.rows_affected() == 0 {
@@ -143,32 +144,32 @@ async fn patch_event_icon(
         }
     }
 }
-
+ 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
     tracing_subscriber::fmt::init();
-
+ 
     let database_url = env::var("DATABASE_URL")
         .expect("DATABASE_URL environment variable must be set");
-
+ 
     let connect_options = PgConnectOptions::from_str(&database_url)?
         .statement_cache_capacity(0);
-
+ 
     let api_pool = PgPoolOptions::new()
         .max_connections(25)
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(connect_options.clone())
         .await?;
-
+ 
     let sync_pool = PgPoolOptions::new()
         .max_connections(15)
         .acquire_timeout(Duration::from_secs(15))
         .connect_with(connect_options)
         .await?;
-
+ 
     println!("✅ Connected to database (dual pool: 25 API + 15 sync)");
-
+ 
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
         .route("/prediction_events/:id/icon", patch(patch_event_icon))
@@ -177,20 +178,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(endpoints::alpha_routes())
         .merge(market_history::routes())
         .merge(indicators::routes())
+        .merge(live_stats::routes())
         .nest("/book", orderbook::routes())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
-
+ 
     // ── Background workers ──
     let trade_pool = api_pool.clone();
     tokio::spawn(trades::run_trade_ingestion_loop(trade_pool));
     tokio::spawn(alpha::run_alpha_detection_loop(api_pool.clone()));
     tokio::spawn(indicators::run_indicator_loop(api_pool.clone()));
-
+    tokio::spawn(market_history::run_poly_history_loop(api_pool.clone()));
+    tokio::spawn(live_stats::run_live_stats_loop(api_pool.clone()));
+ 
     // Polymarket CLOB websocket (public, no auth)
     tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
-
+ 
     // Kalshi WebSocket — strip "kalshi:" prefix before passing to ws loop
     let kalshi_pool = api_pool.clone();
     tokio::spawn(async move {
@@ -212,13 +216,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("⚠️  kalshi_ws ticker fetch failed: {e}");
                 vec![]
             });
-
+ 
             if kalshi_tickers.is_empty() {
                 eprintln!("⚠️  kalshi_ws: no tickers yet, retrying in 30s");
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 continue;
             }
-
+ 
             println!("🟢 kalshi_ws: subscribing to {} tickers", kalshi_tickers.len());
             if let Err(e) = fetchers::kalshi_ws::run_kalshi_ws_loop(
                 kalshi_pool.clone(),
@@ -229,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
-
+ 
     // ── Main REST sync loop ──
     tokio::spawn(async move {
         let fetcher = MarketFetcher::new();
@@ -240,18 +244,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         kalshi_headers.insert("Accept", HeaderValue::from_static("application/json"));
         kalshi_headers.insert("User-Agent", HeaderValue::from_static("Mozilla/5.0"));
         let kalshi_client = reqwest::Client::builder().default_headers(kalshi_headers).build().unwrap();
-
+ 
         let mut poly_headers = HeaderMap::new();
         poly_headers.insert("Accept", HeaderValue::from_static("application/json"));
         poly_headers.insert("User-Agent", HeaderValue::from_static("Mozilla/5.0"));
         let poly_client = reqwest::Client::builder().default_headers(poly_headers).build().unwrap();
-
+ 
         println!("🚀 Britespeck sync engine started");
-
+ 
         loop {
             println!("\n🔄 Starting sync cycle...");
             let events = fetcher.fetch_all(&kalshi_client, &poly_client).await;
-
+ 
             if !events.is_empty() {
                 let mut ids = Vec::new();
                 let mut titles = Vec::new();
@@ -266,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut urls = Vec::new();
                 let mut ends = Vec::new();
                 let mut clob_tokens: Vec<Option<String>> = Vec::new();
-
+ 
                 for e in &events {
                     ids.push(e.id);
                     titles.push(e.title.clone());
@@ -282,7 +286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ends.push(e.end_date);
                     clob_tokens.push(e.clob_token_yes.clone());
                 }
-
+ 
                 let result = sqlx::query(
                     r#"
                     INSERT INTO public.prediction_events
@@ -297,7 +301,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         market_url = COALESCE(EXCLUDED.market_url, public.prediction_events.market_url),
                         category = COALESCE(EXCLUDED.category, public.prediction_events.category),
                         clob_token_yes = COALESCE(EXCLUDED.clob_token_yes, public.prediction_events.clob_token_yes),
-                        -- CRITICAL: only update status to 'active' if not already manually closed
                         status = CASE
                             WHEN public.prediction_events.status = 'closed' THEN 'closed'
                             ELSE EXCLUDED.status
@@ -320,12 +323,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bind(&clob_tokens)
                 .execute(&sync_pool)
                 .await;
-
+ 
                 match result {
                     Ok(res) => println!("💾 Batch persisted {} events", res.rows_affected()),
                     Err(e) => eprintln!("❌ Batch upsert failed: {}", e),
                 }
-
+ 
                 // Auto-close expired contracts
                 sqlx::query(
                     "UPDATE public.prediction_events
@@ -336,7 +339,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .execute(&sync_pool)
                 .await
                 .ok();
-
+ 
                 // Auto-close essentially resolved contracts (99¢+ or 1¢-)
                 sqlx::query(
                     "UPDATE public.prediction_events
@@ -347,7 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .execute(&sync_pool)
                 .await
                 .ok();
-
+ 
                 // Auto-close zero volume with approaching end date
                 sqlx::query(
                     "UPDATE public.prediction_events
@@ -360,7 +363,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .execute(&sync_pool)
                 .await
                 .ok();
-
+ 
                 match market_history::write_snapshots(
                     &sync_pool, &ids, &titles, &platforms, &odds, volumes.as_slice(),
                 ).await {
@@ -368,19 +371,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => eprintln!("⚠️ Snapshot write failed: {}", e),
                 }
             }
-
+ 
             if let Err(e) = strategy::run_omg_strategy(&sync_pool).await {
                 println!("⚠️ OMG Strategy Warning: {}", e);
             }
-
+ 
             println!("💤 Sleeping 30s...");
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });
-
+ 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     println!("📡 Britespeck API listening on port 8080");
     axum::serve(listener, app).await?;
-
+ 
     Ok(())
 }
