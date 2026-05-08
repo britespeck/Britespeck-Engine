@@ -11,6 +11,7 @@ mod fetchers;
 mod orderbook;
 mod indicators;
 mod live_stats;
+mod strategy_signals;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -179,6 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(market_history::routes())
         .merge(indicators::routes())
         .merge(live_stats::routes())
+        .merge(strategy_signals::routes())
         .nest("/book", orderbook::routes())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
@@ -191,6 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(indicators::run_indicator_loop(api_pool.clone()));
     tokio::spawn(market_history::run_poly_history_loop(api_pool.clone()));
     tokio::spawn(live_stats::run_live_stats_loop(api_pool.clone()));
+    tokio::spawn(strategy_signals::run_strategy_signal_loop(api_pool.clone()));
 
     // Polymarket CLOB websocket (public, no auth)
     tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
