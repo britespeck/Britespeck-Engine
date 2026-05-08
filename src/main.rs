@@ -367,6 +367,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .ok();
 
+                // Auto-cleanup old alpha signals — keep 1 day only
+                sqlx::query(
+                    "DELETE FROM public.alpha_signals
+                     WHERE created_at < NOW() - INTERVAL '1 day'"
+                )
+                .execute(&sync_pool)
+                .await
+                .ok();
+
                 match market_history::write_snapshots(
                     &sync_pool, &ids, &titles, &platforms, &odds, volumes.as_slice(),
                 ).await {
