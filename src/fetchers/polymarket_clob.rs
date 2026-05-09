@@ -212,10 +212,53 @@ async fn persist_book(pool: &PgPool, event_id: &str, token_id: &str, book: &Loca
         .execute(&mut *tx).await?;
     }
     tx.commit().await?;
+
+    // ── Real-time price update from best bid ───────────────────────
+    // Update prediction_events.odds with the best YES bid price
+    // so Britespeck shows live prices matching Polymarket's interface
+    if let Some((best_bid, _)) = bids.first() {
+        if *best_bid > 0.0 && *best_bid < 1.0 {
+            sqlx::query(
+                "UPDATE public.prediction_events
+                 SET odds = $1, updated_at = NOW()
+                 WHERE external_id = $2
+                   AND status = 'active'"
+            )
+            .bind(best_bid)
+            .bind(event_id)
+            .execute(pool)
+            .await
+            .ok(); // Non-fatal
+        }
+    }
+
     Ok(())
 }
 
 async fn persist_trade(pool: &PgPool, event_id: &str, price: f64, size: f64, side: Option<String>) -> anyhow::Result<()> {
+    // ── Real-time price update from last trade ─────────────────────
+    // YES side trade = direct price update
+    // NO side trade = 1.0 - price is the YES price
+    let yes_price = match side.as_deref() {
+        Some("buy") | Some("yes") => price,
+        Some("sell") | Some("no") => 1.0 - price,
+        _ => price,
+    };
+
+    if yes_price > 0.0 && yes_price < 1.0 {
+        sqlx::query(
+            "UPDATE public.prediction_events
+             SET odds = $1, updated_at = NOW()
+             WHERE external_id = $2
+               AND status = 'active'"
+        )
+        .bind(yes_price)
+        .bind(event_id)
+        .execute(pool)
+        .await
+        .ok(); // Non-fatal
+    }
+
     sqlx::query(
         "INSERT INTO public.raw_trades
             (id, event_id, platform, price, size, side, trade_timestamp, ingested_at)

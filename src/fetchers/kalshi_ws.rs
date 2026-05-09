@@ -124,6 +124,32 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
                 }
             }
             tx.commit().await?;
+
+            // ── Real-time price from orderbook best bid ────────────
+            // Extract best yes bid price and update prediction_events
+            // This fires on every orderbook update — much more frequent than trades
+            if let Some(yes_levels) = msg.get("yes").and_then(|x| x.as_array()) {
+                if let Some(best_bid) = yes_levels.first() {
+                    let bid_price = best_bid.get(0)
+                        .and_then(|x| x.as_f64())
+                        .map(|p| p / 100.0)
+                        .unwrap_or(0.0);
+
+                    if bid_price > 0.0 && bid_price < 1.0 {
+                        sqlx::query(
+                            "UPDATE public.prediction_events
+                             SET odds = $1, updated_at = NOW()
+                             WHERE external_id = $2
+                               AND status = 'active'"
+                        )
+                        .bind(bid_price)
+                        .bind(&event_id)
+                        .execute(pool)
+                        .await
+                        .ok();
+                    }
+                }
+            }
         }
         "trade" => {
             let ticker = msg.get("market_ticker").and_then(|x| x.as_str()).unwrap_or("");
@@ -140,6 +166,23 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
             let ts_secs = msg.get("ts").and_then(|x| x.as_i64()).unwrap_or(0);
             let ts = chrono::DateTime::from_timestamp(ts_secs, 0).unwrap_or_else(Utc::now);
 
+            // ── Real-time price update ─────────────────────────────
+            // Update prediction_events.odds immediately on every trade
+            // so Britespeck shows live prices matching Kalshi's interface
+            if price > 0.0 && price < 1.0 {
+                sqlx::query(
+                    "UPDATE public.prediction_events
+                     SET odds = $1, updated_at = NOW()
+                     WHERE external_id = $2
+                       AND status = 'active'"
+                )
+                .bind(price)
+                .bind(&event_id)
+                .execute(pool)
+                .await
+                .ok(); // Non-fatal — don't fail the whole handler on miss
+            }
+
             sqlx::query(
                 "INSERT INTO trades_tape (event_id, platform, token_id, side, price, size, trade_timestamp)
                  VALUES ($1,'Kalshi',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING"
@@ -152,5 +195,3 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
     }
     Ok(())
 }
-
-
