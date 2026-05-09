@@ -229,6 +229,11 @@ async fn persist_book(pool: &PgPool, event_id: &str, token_id: &str, book: &Loca
             .execute(pool)
             .await
             .ok(); // Non-fatal
+
+            // Broadcast to SSE clients instantly
+            crate::live_prices::publish_price_update(
+                event_id, event_id, "Polymarket", *best_bid
+            );
         }
     }
 
@@ -257,6 +262,11 @@ async fn persist_trade(pool: &PgPool, event_id: &str, price: f64, size: f64, sid
         .execute(pool)
         .await
         .ok(); // Non-fatal
+
+        // Broadcast to SSE clients instantly
+        crate::live_prices::publish_price_update(
+            event_id, event_id, "Polymarket", yes_price
+        );
     }
 
     sqlx::query(

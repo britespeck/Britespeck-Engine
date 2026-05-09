@@ -147,6 +147,11 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
                         .execute(pool)
                         .await
                         .ok();
+
+                        // Broadcast to SSE clients instantly
+                        crate::live_prices::publish_price_update(
+                            &event_id, &event_id, "Kalshi", bid_price
+                        );
                     }
                 }
             }
@@ -181,6 +186,11 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
                 .execute(pool)
                 .await
                 .ok(); // Non-fatal — don't fail the whole handler on miss
+
+                // Broadcast to SSE clients instantly
+                crate::live_prices::publish_price_update(
+                    &event_id, &event_id, "Kalshi", price
+                );
             }
 
             sqlx::query(

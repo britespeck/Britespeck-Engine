@@ -14,6 +14,7 @@ mod live_stats;
 mod strategy_signals;
 mod contract_parser;
 mod player_stats;
+mod live_prices;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -184,6 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(live_stats::routes())
         .merge(strategy_signals::routes())
         .merge(player_stats::routes())
+        .merge(live_prices::routes())
         .nest("/book", orderbook::routes())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
@@ -370,10 +372,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .ok();
 
-                // Auto-cleanup old alpha signals — keep 1 day only
+                // ── Auto-cleanup old data ─────────────────────────────
+                // Runs every 30s but each DELETE is fast because tables stay small
+
+                // Alpha signals — keep 6 hours only (was 1 day, too slow)
                 sqlx::query(
                     "DELETE FROM public.alpha_signals
-                     WHERE created_at < NOW() - INTERVAL '1 day'"
+                     WHERE created_at < NOW() - INTERVAL '6 hours'"
+                )
+                .execute(&sync_pool)
+                .await
+                .ok();
+
+                // Market indicators — keep 24 hours only
+                sqlx::query(
+                    "DELETE FROM public.market_indicators
+                     WHERE computed_at < NOW() - INTERVAL '24 hours'"
+                )
+                .execute(&sync_pool)
+                .await
+                .ok();
+
+                // Orderbook snapshots — keep 2 hours only (real-time data only)
+                sqlx::query(
+                    "DELETE FROM public.orderbook_snapshots
+                     WHERE captured_at < NOW() - INTERVAL '2 hours'"
+                )
+                .execute(&sync_pool)
+                .await
+                .ok();
+
+                // Market history — keep 7 days only (enough for all momentum calcs)
+                sqlx::query(
+                    "DELETE FROM public.market_history
+                     WHERE recorded_at < NOW() - INTERVAL '7 days'"
+                )
+                .execute(&sync_pool)
+                .await
+                .ok();
+
+                // Raw trades — keep 30 days only
+                sqlx::query(
+                    "DELETE FROM public.raw_trades
+                     WHERE ingested_at < NOW() - INTERVAL '30 days'"
                 )
                 .execute(&sync_pool)
                 .await
