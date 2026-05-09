@@ -372,6 +372,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .ok();
 
+                // Auto-close essentially resolved contracts (97¢+ or 3¢-)
+                // These are done — no trading edge remains
+                sqlx::query(
+                    "UPDATE public.prediction_events
+                     SET status = 'closed'
+                     WHERE status = 'active'
+                       AND (odds > 0.97 OR odds < 0.03)"
+                )
+                .execute(&sync_pool)
+                .await
+                .ok();
+
                 // ── Auto-cleanup old data ─────────────────────────────
                 // Runs every 30s but each DELETE is fast because tables stay small
 
