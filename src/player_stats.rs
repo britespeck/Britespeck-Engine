@@ -1691,8 +1691,9 @@ async fn fetch_crypto_context(
     };
 
     // Cache for 5 minutes
+    let crypto_cache_key = format!("crypto:{}", symbol.to_lowercase());
     if let Ok(json) = serde_json::to_string(&result) {
-        cache_set(&cache_key, &json, TTL_CRYPTO);
+        cache_set(&crypto_cache_key, &json, TTL_CRYPTO);
     }
 
     Ok(Some(result))
