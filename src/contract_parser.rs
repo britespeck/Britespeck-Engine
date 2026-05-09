@@ -403,7 +403,7 @@ pub fn parse_contract(title: &str) -> ContractInfo {
 fn parse_player_prop(title: &str, lower: &str) -> Option<PlayerPropInfo> {
     // Look for O/U pattern with a number
     // Patterns: "O/U 28.5", "Over/Under 1.5", "Pts O/U 20"
-    let ou_regex_patterns = [
+    let _ou_regex_patterns = [
         r":\s*(.+?)\s+[Oo]/[Uu]\s+([\d.]+)",
         r":\s*(.+?)\s+[Oo]ver/[Uu]nder\s+([\d.]+)",
         r"—\s*(.+?):\s*(.+?)\s+[Oo]/[Uu]\s+([\d.]+)",

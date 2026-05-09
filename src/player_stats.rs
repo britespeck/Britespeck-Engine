@@ -27,9 +27,72 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::contract_parser::{parse_contract, stat_display_name, ContractCategory, StatType};
+
+// ── In-Memory Cache ────────────────────────────────────────────────
+// Prevents hammering external APIs on every request.
+// TTLs:
+//   Player stats    → 4 hours  (stats don't change mid-game)
+//   Weather         → 30 mins  (forecast updates hourly)
+//   Crypto prices   → 5 mins   (prices move fast)
+//   Fed probs       → 1 hour
+//   Mentions/EDGAR  → 24 hours (filings don't change)
+
+#[derive(Clone)]
+struct CacheEntry {
+    data: String,      // JSON serialized
+    inserted_at: Instant,
+    ttl_secs: u64,
+}
+
+impl CacheEntry {
+    fn is_expired(&self) -> bool {
+        self.inserted_at.elapsed().as_secs() > self.ttl_secs
+    }
+}
+
+type Cache = Arc<Mutex<HashMap<String, CacheEntry>>>;
+
+fn get_cache() -> Cache {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    CACHE.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
+}
+
+fn cache_get(key: &str) -> Option<String> {
+    let cache = get_cache();
+    let lock = cache.lock().ok()?;
+    let entry = lock.get(key)?;
+    if entry.is_expired() {
+        return None;
+    }
+    Some(entry.data.clone())
+}
+
+fn cache_set(key: &str, data: &str, ttl_secs: u64) {
+    if let Ok(mut lock) = get_cache().lock() {
+        // Evict expired entries periodically
+        if lock.len() > 500 {
+            lock.retain(|_, v| !v.is_expired());
+        }
+        lock.insert(key.to_string(), CacheEntry {
+            data: data.to_string(),
+            inserted_at: Instant::now(),
+            ttl_secs,
+        });
+    }
+}
+
+// Cache TTL constants (seconds)
+const TTL_PLAYER_STATS: u64 = 4 * 3600;   // 4 hours
+const TTL_WEATHER: u64      = 30 * 60;     // 30 minutes
+const TTL_CRYPTO: u64       = 5 * 60;      // 5 minutes
+const TTL_FED: u64          = 3600;        // 1 hour
+const TTL_MENTIONS: u64     = 24 * 3600;   // 24 hours
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -410,8 +473,17 @@ pub async fn fetch_player_stats(
     sport_hint: Option<&str>,
 ) -> anyhow::Result<Option<PlayerSeasonStats>> {
     let sport = sport_hint.unwrap_or("nba");
+    let cache_key = format!("player:{}:{}", player_name.to_lowercase(), sport);
 
-    match sport {
+    // Check cache first
+    if let Some(cached) = cache_get(&cache_key) {
+        if let Ok(stats) = serde_json::from_str::<PlayerSeasonStats>(&cached) {
+            tracing::debug!("Cache hit: player stats for {}", player_name);
+            return Ok(Some(stats));
+        }
+    }
+
+    let result = match sport {
         "nba" => fetch_nba_player_stats(client, player_name).await,
         "soccer" | "football" => fetch_soccer_player_stats(client, player_name).await,
         "tennis" => fetch_tennis_player_stats(client, player_name).await,
@@ -439,7 +511,17 @@ pub async fn fetch_player_stats(
             }
             fetch_golf_player_stats(client, player_name).await
         }
+    };
+
+    // Store in cache if successful
+    if let Ok(Some(ref stats)) = result {
+        if let Ok(json) = serde_json::to_string(stats) {
+            cache_set(&cache_key, &json, TTL_PLAYER_STATS);
+            tracing::debug!("Cached player stats for {} ({}h TTL)", player_name, TTL_PLAYER_STATS / 3600);
+        }
     }
+
+    result
 }
 
 // ── NBA Stats — balldontlie.io ─────────────────────────────────────
@@ -520,7 +602,7 @@ async fn fetch_nba_player_stats(
         let tpg = s.get("turnover").and_then(|v| v.as_f64());
         let mpg = s.get("min").and_then(|v| v.as_f64());
         let fg = s.get("fg_pct").and_then(|v| v.as_f64());
-        let fg3 = s.get("fg3_pct").and_then(|v| v.as_f64());
+        let _fg3 = s.get("fg3_pct").and_then(|v| v.as_f64());
         let games = s.get("games_played").and_then(|v| v.as_i64());
         let threes = s.get("fg3m").and_then(|v| v.as_f64());
 
@@ -600,7 +682,10 @@ async fn fetch_nba_stats_cdn(
         return Ok(None);
     };
 
-    let name_idx = headers.iter().position(|h| h.as_str() == Some("PLAYER"))?;
+    let name_idx = match headers.iter().position(|h| h.as_str() == Some("PLAYER")) {
+        Some(i) => i,
+        None => return Ok(None),
+    };
     let pts_idx = headers.iter().position(|h| h.as_str() == Some("PTS"));
     let reb_idx = headers.iter().position(|h| h.as_str() == Some("REB"));
     let ast_idx = headers.iter().position(|h| h.as_str() == Some("AST"));
@@ -1593,7 +1678,7 @@ async fn fetch_crypto_context(
     let symbol_upper = data.get("symbol").and_then(|s| s.as_str())
         .unwrap_or(symbol).to_uppercase();
 
-    Ok(Some(CryptoContext {
+    let result = CryptoContext {
         symbol: symbol_upper,
         current_price_usd: current_price,
         price_change_24h_pct: change_24h,
@@ -1603,7 +1688,14 @@ async fn fetch_crypto_context(
         distance_from_ath_pct: distance_from_ath,
         source: "CoinGecko".to_string(),
         fetched_at: Utc::now(),
-    }))
+    };
+
+    // Cache for 5 minutes
+    if let Ok(json) = serde_json::to_string(&result) {
+        cache_set(&cache_key, &json, TTL_CRYPTO);
+    }
+
+    Ok(Some(result))
 }
 
 // ── Fed/Economic Context — CME FedWatch ───────────────────────────
@@ -1625,7 +1717,7 @@ async fn fetch_fed_context(
         .await;
 
     // CME API can be finicky — try alternative endpoint
-    let fed_probs = match resp {
+    let _fed_probs = match resp {
         Ok(r) if r.status().is_success() => {
             r.json::<serde_json::Value>().await.ok()
         }
@@ -1847,6 +1939,16 @@ pub async fn fetch_weather_context(
     client: &Client,
     location: &str,
 ) -> anyhow::Result<Option<WeatherContext>> {
+    let cache_key = format!("weather:{}", location.to_lowercase());
+
+    // Check cache first (30 min TTL)
+    if let Some(cached) = cache_get(&cache_key) {
+        if let Ok(ctx) = serde_json::from_str::<WeatherContext>(&cached) {
+            tracing::debug!("Cache hit: weather for {}", location);
+            return Ok(Some(ctx));
+        }
+    }
+
     let (lat, lon, display_name) = match city_coordinates(location) {
         Some(coords) => coords,
         None => return Ok(None),
@@ -1921,7 +2023,7 @@ pub async fn fetch_weather_context(
         })
         .collect();
 
-    Ok(Some(WeatherContext {
+    let result = WeatherContext {
         location: display_name.to_string(),
         latitude: lat,
         longitude: lon,
@@ -1936,7 +2038,14 @@ pub async fn fetch_weather_context(
         forecast_7_day,
         source: "Open-Meteo (openmeteo.com)".to_string(),
         fetched_at: Utc::now(),
-    }))
+    };
+
+    // Cache for 30 minutes
+    if let Ok(json) = serde_json::to_string(&result) {
+        cache_set(&cache_key, &json, TTL_WEATHER);
+    }
+
+    Ok(Some(result))
 }
 
 // ── Mentions/Earnings Context — SEC EDGAR + Financial News ─────────
@@ -2025,6 +2134,18 @@ pub async fn fetch_mentions_context(
     company: &str,
     keyword: Option<&str>,
 ) -> anyhow::Result<Option<MentionsContext>> {
+    let cache_key = format!("mentions:{}:{}", 
+        company.to_lowercase(), 
+        keyword.unwrap_or("none"));
+
+    // Check cache first (24 hour TTL — filings don't change)
+    if let Some(cached) = cache_get(&cache_key) {
+        if let Ok(ctx) = serde_json::from_str::<MentionsContext>(&cached) {
+            tracing::debug!("Cache hit: mentions for {}", company);
+            return Ok(Some(ctx));
+        }
+    }
+
     let ticker = company_ticker(company);
 
     let mut recent_filings = Vec::new();
@@ -2130,7 +2251,7 @@ pub async fn fetch_mentions_context(
         ticker_str.as_deref().map(|t| format!(" ({})", t)).unwrap_or_default()
     );
 
-    Ok(Some(MentionsContext {
+    let result = MentionsContext {
         company_name: company_display,
         ticker: ticker_str,
         next_earnings_date: next_earnings,
@@ -2139,7 +2260,14 @@ pub async fn fetch_mentions_context(
         keyword_mentions,
         source: "SEC EDGAR + Financial Modeling Prep".to_string(),
         fetched_at: Utc::now(),
-    }))
+    };
+
+    // Cache for 24 hours — SEC filings don't change
+    if let Ok(json) = serde_json::to_string(&result) {
+        cache_set(&cache_key, &json, TTL_MENTIONS);
+    }
+
+    Ok(Some(result))
 }
 
 // ── F1 Stats — ESPN public API ────────────────────────────────────
@@ -2427,7 +2555,7 @@ async fn fetch_golf_owgr(
     // DataGolf public rankings (free)
     let url = "https://datagolf.com/api/current-round-stats?tour=pga&file_format=json&key=";
 
-    let resp = client
+    let _resp = client
         .get(url)
         .header("User-Agent", "Mozilla/5.0")
         .timeout(Duration::from_secs(6))
@@ -2436,7 +2564,7 @@ async fn fetch_golf_owgr(
 
     // DataGolf requires key — just return note
     let player_lower = player_name.to_lowercase();
-    let last_name = player_lower.split_whitespace().last().unwrap_or(&player_lower);
+    let _last_name = player_lower.split_whitespace().last().unwrap_or(&player_lower);
 
     Ok(Some(PlayerSeasonStats {
         player_name: player_name.to_string(),
