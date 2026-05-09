@@ -12,6 +12,8 @@ mod orderbook;
 mod indicators;
 mod live_stats;
 mod strategy_signals;
+mod contract_parser;
+mod player_stats;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -181,6 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(indicators::routes())
         .merge(live_stats::routes())
         .merge(strategy_signals::routes())
+        .merge(player_stats::routes())
         .nest("/book", orderbook::routes())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())

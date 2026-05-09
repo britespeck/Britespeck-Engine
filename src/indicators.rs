@@ -1085,54 +1085,140 @@ async fn compute_omg_suggestion(pool: &PgPool, event_id: Uuid) -> anyhow::Result
     };
 
     // ── Exit targets ───────────────────────────────────────────
-    let exit_targets = if price < 0.50 {
-        // Underdog — momentum exit strategy
-        let target1 = (price * 1.75).min(0.95);
-        let target2 = (price * 2.50).min(0.95);
-        let profit1 = ((target1 - price) / price * 100.0).round();
-        let profit2 = ((target2 - price) / price * 100.0).round();
+    // Four distinct strategies based on price range:
+    // 1. Near-certain (85¢+)  — hold to resolution, collect guaranteed %
+    // 2. Favorite (60-85¢)    — tighter exits, smaller upside
+    // 3. Midrange (30-60¢)    — balanced momentum exits
+    // 4. Underdog (<30¢)      — lottery ticket exits, 1.75x and 2.5x
+
+    let exit_targets = if price >= 0.85 {
+        // NEAR-CERTAIN FAVORITE — lock-in strategy
+        // At 85¢+ the only play is hold to $1.00
+        // Don't suggest selling at a higher price — it's already near max
+        let profit_at_resolution = ((1.0 - price) / price * 100.0).round();
+        let profit_cents = ((1.0 - price) * 100.0).round();
         vec![
             ExitTarget {
-                price: target1,
-                sell_pct: 40.0,
-                profit_pct: profit1,
-                label: format!("Take profit 1 — sell 40% at {:.0}¢ (+{:.0}%)", target1 * 100.0, profit1),
-            },
-            ExitTarget {
-                price: target2,
-                sell_pct: 40.0,
-                profit_pct: profit2,
-                label: format!("Take profit 2 — sell 40% at {:.0}¢ (+{:.0}%)", target2 * 100.0, profit2),
-            },
-            ExitTarget {
                 price: 1.0,
-                sell_pct: 20.0,
-                profit_pct: ((1.0 - price) / price * 100.0).round(),
-                label: "Hold 20% for full payout if it wins".to_string(),
+                sell_pct: 100.0,
+                profit_pct: profit_at_resolution,
+                label: format!(
+                    "Hold to resolution — collect {:.0}¢ profit per contract ({:.0}% return)",
+                    profit_cents, profit_at_resolution
+                ),
             },
         ]
-    } else {
-        // Favorite — tighter exits
-        let target1 = (price * 1.10).min(0.98);
+    } else if price >= 0.60 {
+        // MODERATE FAVORITE — two exits
+        // Target 1: sell majority near current price if it ticks up slightly
+        // Target 2: hold remainder to resolution
+        let target1 = (price + 0.05).min(0.97); // +5¢ from entry
         let profit1 = ((target1 - price) / price * 100.0).round();
+        let profit_resolution = ((1.0 - price) / price * 100.0).round();
         vec![
             ExitTarget {
                 price: target1,
                 sell_pct: 60.0,
                 profit_pct: profit1,
-                label: format!("Take profit — sell 60% at {:.0}¢ (+{:.0}%)", target1 * 100.0, profit1),
+                label: format!(
+                    "Take profit — sell 60% at {:.0}¢ (+{:.0}%)",
+                    target1 * 100.0, profit1
+                ),
             },
             ExitTarget {
                 price: 1.0,
                 sell_pct: 40.0,
-                profit_pct: ((1.0 - price) / price * 100.0).round(),
-                label: "Hold 40% for full payout".to_string(),
+                profit_pct: profit_resolution,
+                label: format!(
+                    "Hold 40% to resolution for {:.0}% return",
+                    profit_resolution
+                ),
+            },
+        ]
+    } else if price >= 0.30 {
+        // MIDRANGE — three exits, momentum strategy
+        let target1 = (price * 1.30).min(0.95); // +30%
+        let target2 = (price * 1.60).min(0.97); // +60%
+        let profit1 = ((target1 - price) / price * 100.0).round();
+        let profit2 = ((target2 - price) / price * 100.0).round();
+        let profit_resolution = ((1.0 - price) / price * 100.0).round();
+        vec![
+            ExitTarget {
+                price: target1,
+                sell_pct: 40.0,
+                profit_pct: profit1,
+                label: format!(
+                    "Take profit 1 — sell 40% at {:.0}¢ (+{:.0}%)",
+                    target1 * 100.0, profit1
+                ),
+            },
+            ExitTarget {
+                price: target2,
+                sell_pct: 40.0,
+                profit_pct: profit2,
+                label: format!(
+                    "Take profit 2 — sell 40% at {:.0}¢ (+{:.0}%)",
+                    target2 * 100.0, profit2
+                ),
+            },
+            ExitTarget {
+                price: 1.0,
+                sell_pct: 20.0,
+                profit_pct: profit_resolution,
+                label: "Hold 20% for full payout if it wins".to_string(),
+            },
+        ]
+    } else {
+        // UNDERDOG (<30¢) — lottery ticket momentum exits
+        // You don't need it to win — just need the price to move
+        let target1 = (price * 1.75).min(0.90);
+        let target2 = (price * 2.50).min(0.95);
+        let profit1 = ((target1 - price) / price * 100.0).round();
+        let profit2 = ((target2 - price) / price * 100.0).round();
+        let profit_resolution = ((1.0 - price) / price * 100.0).round();
+        vec![
+            ExitTarget {
+                price: target1,
+                sell_pct: 40.0,
+                profit_pct: profit1,
+                label: format!(
+                    "Take profit 1 — sell 40% at {:.0}¢ (+{:.0}%)",
+                    target1 * 100.0, profit1
+                ),
+            },
+            ExitTarget {
+                price: target2,
+                sell_pct: 40.0,
+                profit_pct: profit2,
+                label: format!(
+                    "Take profit 2 — sell 40% at {:.0}¢ (+{:.0}%)",
+                    target2 * 100.0, profit2
+                ),
+            },
+            ExitTarget {
+                price: 1.0,
+                sell_pct: 20.0,
+                profit_pct: profit_resolution,
+                label: "Hold 20% for full payout if it wins".to_string(),
             },
         ]
     };
 
     // ── Stop loss ──────────────────────────────────────────────
-    let stop_loss = (price * 0.50).max(0.01);
+    // Stop loss scales with price:
+    // Near-certain (85¢+): no stop loss — holding to resolution
+    // Favorite (60-85¢): -10¢ from entry
+    // Midrange (30-60¢): -30% from entry
+    // Underdog (<30¢): -50% from entry (already cheap, limit loss)
+    let stop_loss = if price >= 0.85 {
+        0.0 // No stop loss for near-certain — hold to resolution
+    } else if price >= 0.60 {
+        (price - 0.10).max(0.01) // -10¢ from entry
+    } else if price >= 0.30 {
+        (price * 0.70).max(0.01) // -30% from entry
+    } else {
+        (price * 0.50).max(0.01) // -50% from entry
+    };
     let stop_loss_cents = (stop_loss * 100.0).round() as i64;
 
     // ── Kelly sizing on $100 bankroll ──────────────────────────
