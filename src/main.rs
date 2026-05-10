@@ -95,7 +95,11 @@ async fn get_predictions(
              )
            )
          ORDER BY 
+           -- Active before determined
            CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+           -- Recently traded contracts first (live games at top)
+           CASE WHEN updated_at > NOW() - INTERVAL '5 minutes' THEN 0 ELSE 1 END,
+           -- Then by volume
            volume_24h DESC NULLS LAST
          LIMIT 10000"
     )
@@ -390,13 +394,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .ok();
 
-                // Auto-close essentially resolved contracts (97¢+ or 3¢-)
-                // These are done — no trading edge remains
+                // Auto-close determined contracts:
+                // 1. Near-resolved AND no recent trading activity
+                // 2. Odds at extremes = market has spoken
                 sqlx::query(
                     "UPDATE public.prediction_events
                      SET status = 'closed'
                      WHERE status = 'active'
-                       AND (odds > 0.97 OR odds < 0.03)"
+                       AND (
+                         -- Clearly resolved: at or near 100%/0%
+                         (odds >= 0.97 OR odds <= 0.03)
+                         AND updated_at < NOW() - INTERVAL '1 hour'
+                       )"
                 )
                 .execute(&sync_pool)
                 .await
