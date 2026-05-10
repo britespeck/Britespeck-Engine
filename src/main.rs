@@ -74,12 +74,13 @@ async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<Predictio
                 volume_24h, updated_at, outcomes, market_url, end_date,
                 rsi_signal, sentiment_score, clob_token_yes
          FROM public.prediction_events
-         WHERE status = 'active'
-           AND volume_24h > 100
-           AND (end_date IS NULL OR end_date > NOW())
-           AND odds > 0.01
-           AND odds < 0.99
-         ORDER BY volume_24h DESC NULLS LAST
+         WHERE status IN ('active', 'determined')
+           AND (end_date IS NULL OR end_date > NOW() - INTERVAL '24 hours')
+           AND odds > 0.02
+           AND odds < 0.98
+         ORDER BY 
+           CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+           volume_24h DESC NULLS LAST
          LIMIT 10000"
     )
     .fetch_all(&pool)

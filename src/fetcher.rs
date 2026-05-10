@@ -11,6 +11,181 @@ pub struct MarketFetcher {
 }
 
 // ─── CATEGORY HEURISTIC (TITLE FALLBACK ONLY) ────────────────────────
+// ── Team Nickname Mapper ───────────────────────────────────────────
+// Kalshi API uses city names, websites use team nicknames.
+// This maps "Minnesota vs Cleveland" → "Minnesota Twins vs Cleveland Guardians"
+// so users can search by team nickname on Britespeck.
+
+fn enrich_title_with_nicknames(title: &str) -> String {
+    let mappings: &[(&str, &str)] = &[
+        // MLB
+        ("Minnesota", "Minnesota Twins"),
+        ("Cleveland", "Cleveland Guardians"),
+        ("New York Y", "New York Yankees"),
+        ("New York M", "New York Mets"),
+        ("Los Angeles D", "LA Dodgers"),
+        ("Los Angeles A", "LA Angels"),
+        ("Chicago W", "Chicago White Sox"),
+        ("Chicago C", "Chicago Cubs"),
+        ("San Francisco", "San Francisco Giants"),
+        ("San Diego", "San Diego Padres"),
+        ("Colorado", "Colorado Rockies"),
+        ("Arizona", "Arizona Diamondbacks"),
+        ("Atlanta", "Atlanta Braves"),
+        ("Miami", "Miami Marlins"),
+        ("Philadelphia", "Philadelphia Phillies"),
+        ("Washington", "Washington Nationals"),
+        ("Pittsburgh", "Pittsburgh Pirates"),
+        ("Cincinnati", "Cincinnati Reds"),
+        ("Milwaukee", "Milwaukee Brewers"),
+        ("St. Louis", "St. Louis Cardinals"),
+        ("Houston", "Houston Astros"),
+        ("Texas", "Texas Rangers"),
+        ("Seattle", "Seattle Mariners"),
+        ("Oakland", "Oakland Athletics"),
+        ("Kansas City", "Kansas City Royals"),
+        ("Detroit", "Detroit Tigers"),
+        ("Toronto", "Toronto Blue Jays"),
+        ("Tampa Bay", "Tampa Bay Rays"),
+        ("Baltimore", "Baltimore Orioles"),
+        ("Boston", "Boston Red Sox"),
+        // NBA
+        ("Oklahoma City", "OKC Thunder"),
+        ("Los Angeles L", "LA Lakers"),
+        ("Los Angeles C", "LA Clippers"),
+        ("Golden State", "Golden State Warriors"),
+        ("San Antonio", "San Antonio Spurs"),
+        ("New Orleans", "New Orleans Pelicans"),
+        ("Memphis", "Memphis Grizzlies"),
+        ("Sacramento", "Sacramento Kings"),
+        ("Portland", "Portland Trail Blazers"),
+        ("Utah", "Utah Jazz"),
+        ("Denver", "Denver Nuggets"),
+        ("Phoenix", "Phoenix Suns"),
+        ("Dallas", "Dallas Mavericks"),
+        ("New York K", "New York Knicks"),
+        ("Brooklyn", "Brooklyn Nets"),
+        ("Indiana", "Indiana Pacers"),
+        ("Chicago B", "Chicago Bulls"),
+        ("Milwaukee B", "Milwaukee Bucks"),
+        ("Cleveland C", "Cleveland Cavaliers"),
+        ("Detroit P", "Detroit Pistons"),
+        ("Orlando", "Orlando Magic"),
+        ("Charlotte", "Charlotte Hornets"),
+        ("Washington W", "Washington Wizards"),
+        ("Atlanta H", "Atlanta Hawks"),
+        ("Miami H", "Miami Heat"),
+        ("Boston C", "Boston Celtics"),
+        ("Toronto R", "Toronto Raptors"),
+        ("Philadelphia 76", "Philadelphia 76ers"),
+        // NHL
+        ("Tampa Bay L", "Tampa Bay Lightning"),
+        ("Florida P", "Florida Panthers"),
+        ("Carolina H", "Carolina Hurricanes"),
+        ("New Jersey D", "New Jersey Devils"),
+        ("New York R", "New York Rangers"),
+        ("New York I", "New York Islanders"),
+        ("Pittsburgh P", "Pittsburgh Penguins"),
+        ("Philadelphia F", "Philadelphia Flyers"),
+        ("Washington C", "Washington Capitals"),
+        ("Columbus", "Columbus Blue Jackets"),
+        ("Nashville", "Nashville Predators"),
+        ("St. Louis B", "St. Louis Blues"),
+        ("Winnipeg", "Winnipeg Jets"),
+        ("Minnesota W", "Minnesota Wild"),
+        ("Chicago BH", "Chicago Blackhawks"),
+        ("Arizona C", "Arizona Coyotes"),
+        ("Vegas", "Vegas Golden Knights"),
+        ("Los Angeles K", "LA Kings"),
+        ("Anaheim", "Anaheim Ducks"),
+        ("San Jose", "San Jose Sharks"),
+        ("Vancouver", "Vancouver Canucks"),
+        ("Edmonton", "Edmonton Oilers"),
+        ("Calgary", "Calgary Flames"),
+        ("Ottawa", "Ottawa Senators"),
+        ("Montreal", "Montreal Canadiens"),
+        ("Buffalo", "Buffalo Sabres"),
+        ("Boston B", "Boston Bruins"),
+        ("Toronto ML", "Toronto Maple Leafs"),
+        // NFL
+        ("Kansas City C", "Kansas City Chiefs"),
+        ("San Francisco 49", "San Francisco 49ers"),
+        ("Philadelphia E", "Philadelphia Eagles"),
+        ("Dallas C", "Dallas Cowboys"),
+        ("New England", "New England Patriots"),
+        ("Green Bay", "Green Bay Packers"),
+        ("Chicago Be", "Chicago Bears"),
+        ("New York G", "New York Giants"),
+        ("New York J", "New York Jets"),
+        ("Buffalo B", "Buffalo Bills"),
+        ("Miami Do", "Miami Dolphins"),
+        ("Baltimore R", "Baltimore Ravens"),
+        ("Pittsburgh St", "Pittsburgh Steelers"),
+        ("Cleveland Br", "Cleveland Browns"),
+        ("Cincinnati Be", "Cincinnati Bengals"),
+        ("Houston Te", "Houston Texans"),
+        ("Indianapolis", "Indianapolis Colts"),
+        ("Jacksonville", "Jacksonville Jaguars"),
+        ("Tennessee", "Tennessee Titans"),
+        ("Denver Br", "Denver Broncos"),
+        ("Las Vegas R", "Las Vegas Raiders"),
+        ("Los Angeles Ch", "LA Chargers"),
+        ("Los Angeles R", "LA Rams"),
+        ("Seattle Se", "Seattle Seahawks"),
+        ("Arizona Ca", "Arizona Cardinals"),
+        ("San Francisco", "San Francisco 49ers"),
+        ("New Orleans Sa", "New Orleans Saints"),
+        ("Atlanta Fa", "Atlanta Falcons"),
+        ("Carolina Pa", "Carolina Panthers"),
+        ("Tampa Bay Bu", "Tampa Bay Buccaneers"),
+        ("Minnesota Vi", "Minnesota Vikings"),
+        ("Detroit Li", "Detroit Lions"),
+        ("Washington Co", "Washington Commanders"),
+        ("Las Vegas R", "Las Vegas Raiders"),
+    ];
+
+    // Only enrich sports titles that contain "vs"
+    let lower = title.to_lowercase();
+    if !lower.contains(" vs") {
+        return title.to_string();
+    }
+
+    // Check if title already has team nicknames (contains common nickname words)
+    let nickname_words = ["twins", "guardians", "yankees", "mets", "dodgers",
+        "angels", "cubs", "sox", "giants", "padres", "rockies", "braves",
+        "marlins", "phillies", "nationals", "pirates", "reds", "brewers",
+        "cardinals", "astros", "rangers", "mariners", "athletics", "royals",
+        "tigers", "rays", "orioles", "thunder", "lakers", "warriors", "spurs",
+        "clippers", "pelicans", "grizzlies", "kings", "blazers", "jazz",
+        "nuggets", "suns", "mavericks", "knicks", "nets", "pacers", "bulls",
+        "bucks", "cavaliers", "pistons", "magic", "hornets", "wizards", "hawks",
+        "heat", "celtics", "raptors", "sixers", "lightning", "panthers",
+        "hurricanes", "devils", "rangers", "islanders", "penguins", "flyers",
+        "capitals", "blue jackets", "predators", "blues", "jets", "wild",
+        "blackhawks", "coyotes", "golden knights", "oilers", "flames", "senators",
+        "canadiens", "sabres", "bruins", "maple leafs", "chiefs", "eagles",
+        "cowboys", "patriots", "packers", "bears", "ravens", "steelers",
+        "browns", "bengals", "texans", "colts", "jaguars", "titans", "broncos",
+        "raiders", "chargers", "rams", "seahawks", "saints", "falcons",
+        "panthers", "buccaneers", "vikings", "lions", "commanders"];
+
+    if nickname_words.iter().any(|nw| lower.contains(nw)) {
+        return title.to_string(); // Already has nicknames
+    }
+
+    // Apply mappings — try longest match first
+    let mut result = title.to_string();
+    for (city, full_name) in mappings {
+        // Only replace if it's a word boundary match (avoid partial matches)
+        if result.contains(city) {
+            result = result.replace(city, full_name);
+        }
+    }
+
+    result
+}
+
+
 fn categorize_by_title(title: &str) -> Option<&'static str> {
     let t = title.to_lowercase();
 
@@ -527,14 +702,19 @@ impl MarketFetcher {
 
             for event in &events {
                 let ev_status = event.get("status").and_then(|s| s.as_str()).unwrap_or("").to_lowercase();
-                if matches!(ev_status.as_str(), "determined" | "settled" | "closed" | "finalized") {
-                    continue;
-                }
+                // Map Kalshi status to our status
+                // Don't skip determined — store them so frontend can show DETERMINED badge
+                let our_status = match ev_status.as_str() {
+                    "determined" | "settled" | "finalized" => "determined",
+                    "closed" => "closed",
+                    _ => "active",
+                };
 
                 let ticker = event.get("event_ticker").and_then(|t| t.as_str()).unwrap_or("").to_string();
                 if ticker.is_empty() { continue; }
 
-                let title = event.get("title").and_then(|t| t.as_str()).unwrap_or("Unknown").to_string();
+                let raw_title = event.get("title").and_then(|t| t.as_str()).unwrap_or("Unknown").to_string();
+                let title = enrich_title_with_nicknames(&raw_title);
                 let category_raw = event.get("category").and_then(|c| c.as_str()).unwrap_or("");
 
                 let event_image = extract_image(event, &[
@@ -548,19 +728,26 @@ impl MarketFetcher {
 
                 let nested = event.get("markets").and_then(|m| m.as_array()).cloned().unwrap_or_default();
 
-                let active_markets: Vec<Value> = nested.into_iter()
+                // Keep all markets including determined ones
+                let all_markets: Vec<Value> = nested.into_iter().collect();
+                if all_markets.is_empty() { continue; }
+
+                // Active markets for price calculation
+                let active_markets: Vec<Value> = all_markets.iter()
                     .filter(|m| {
                         let s = m.get("status").and_then(|s| s.as_str()).unwrap_or("").to_lowercase();
                         !matches!(s.as_str(), "determined" | "settled" | "closed" | "finalized")
                     })
+                    .cloned()
                     .collect();
 
-                if active_markets.is_empty() { continue; }
+                let total_volume: f64 = all_markets.iter().map(extract_kalshi_market_volume).sum();
+                let total_oi: f64 = all_markets.iter().map(extract_kalshi_open_interest).sum();
 
-                let total_volume: f64 = active_markets.iter().map(extract_kalshi_market_volume).sum();
-                let total_oi: f64 = active_markets.iter().map(extract_kalshi_open_interest).sum();
+                // Use active markets for price, fall back to all markets if none active
+                let price_markets = if !active_markets.is_empty() { &active_markets } else { &all_markets };
 
-                let best_market = active_markets.iter()
+                let best_market = price_markets.iter()
                     .min_by(|a, b| {
                         let da = (extract_kalshi_price(a) - 0.5).abs();
                         let db = (extract_kalshi_price(b) - 0.5).abs();
@@ -569,7 +756,7 @@ impl MarketFetcher {
                     .unwrap();
                 let odds = extract_kalshi_price(best_market);
 
-                let mut sorted_markets: Vec<&Value> = active_markets.iter().collect();
+                let mut sorted_markets: Vec<&Value> = price_markets.iter().collect();
                 sorted_markets.sort_by(|a, b| {
                     extract_kalshi_price(b).total_cmp(&extract_kalshi_price(a))
                 });
@@ -581,42 +768,15 @@ impl MarketFetcher {
                         .and_then(|t| t.as_str())
                         .unwrap_or("Yes")
                         .to_string();
-
-                    let parse_dollar = |key: &str| -> Option<f64> {
-                        m.get(key)
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| s.parse::<f64>().ok())
-                            .or_else(|| m.get(key).and_then(|v| v.as_f64()))
-                    };
-
                     MarketOutcome {
                         name,
                         price: extract_kalshi_price(m),
                         volume: extract_kalshi_market_volume(m),
-                        yes_bid: parse_dollar("yes_bid_dollars"),
-                        yes_ask: parse_dollar("yes_ask_dollars"),
-                        no_bid: parse_dollar("no_bid_dollars"),
-                        no_ask: parse_dollar("no_ask_dollars"),
-                        open_interest: m.get("open_interest_fp")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| s.parse::<f64>().ok()),
-                        volume_24h: m.get("volume_24h_fp")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| s.parse::<f64>().ok()),
-                        yes_sub_title: m.get("yes_sub_title")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string()),
-                        no_sub_title: m.get("no_sub_title")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string()),
                     }
                 }).collect();
                 if outcomes.is_empty() {
                     outcomes.push(MarketOutcome {
                         name: "Yes".to_string(), price: odds, volume: total_volume,
-                        yes_bid: None, yes_ask: None, no_bid: None, no_ask: None,
-                        open_interest: None, volume_24h: None,
-                        yes_sub_title: None, no_sub_title: None,
                     });
                 }
 
@@ -640,6 +800,7 @@ impl MarketFetcher {
                     platform: "Kalshi".to_string(),
                     odds,
                     category,
+                    status: our_status.to_string(),
                     external_id: format!("kalshi:{}", ticker),
                     updated_at: Utc::now(),
                     volume_24h: total_volume,
@@ -717,7 +878,8 @@ impl MarketFetcher {
                 let ev_status = event.get("status").and_then(|s| s.as_str()).unwrap_or("").to_lowercase();
                 if matches!(ev_status.as_str(), "resolved" | "closed") { continue; }
 
-                let title = event.get("title").and_then(|t| t.as_str()).unwrap_or("Unknown").to_string();
+                let raw_title = event.get("title").and_then(|t| t.as_str()).unwrap_or("Unknown").to_string();
+                let title = enrich_title_with_nicknames(&raw_title);
                 let ext_id = event.get("id").map(|v| {
                     if let Some(s) = v.as_str() { s.to_string() }
                     else { v.to_string().trim_matches('"').to_string() }
@@ -779,17 +941,11 @@ impl MarketFetcher {
                         name,
                         price: extract_poly_price(m),
                         volume: extract_poly_market_volume(m),
-                        yes_bid: None, yes_ask: None, no_bid: None, no_ask: None,
-                        open_interest: None, volume_24h: None,
-                        yes_sub_title: None, no_sub_title: None,
                     }
                 }).collect();
                 if outcomes.is_empty() {
                     outcomes.push(MarketOutcome {
                         name: "Yes".to_string(), price: odds, volume: total_vol,
-                        yes_bid: None, yes_ask: None, no_bid: None, no_ask: None,
-                        open_interest: None, volume_24h: None,
-                        yes_sub_title: None, no_sub_title: None,
                     });
                 }
 
