@@ -19,7 +19,6 @@ use sqlx::PgPool;
 use std::{convert::Infallible, time::Duration};
 use tokio::sync::broadcast;
 use futures_util::stream;
-use futures_util::StreamExt;
 
 // ── Price Update Event ─────────────────────────────────────────────
 
@@ -74,7 +73,7 @@ pub fn routes() -> Router<PgPool> {
 async fn sse_all_prices_handler(
     State(_pool): State<PgPool>,
 ) -> impl IntoResponse {
-    let mut receiver = get_broadcaster().subscribe();
+    let receiver = get_broadcaster().subscribe();
 
     let stream = stream::unfold(receiver, |mut rx| async move {
         loop {

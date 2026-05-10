@@ -772,11 +772,24 @@ impl MarketFetcher {
                         name,
                         price: extract_kalshi_price(m),
                         volume: extract_kalshi_market_volume(m),
+                        yes_bid: m.get("yes_bid").and_then(|v| v.as_f64()).map(|p| p / 100.0),
+                        yes_ask: m.get("yes_ask").and_then(|v| v.as_f64()).map(|p| p / 100.0),
+                        no_bid: m.get("no_bid").and_then(|v| v.as_f64()).map(|p| p / 100.0),
+                        no_ask: m.get("no_ask").and_then(|v| v.as_f64()).map(|p| p / 100.0),
+                        open_interest: m.get("open_interest").and_then(|v| v.as_f64()),
+                        volume_24h: m.get("volume").and_then(|v| v.as_f64()),
+                        yes_sub_title: m.get("yes_sub_title").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        no_sub_title: m.get("no_sub_title").and_then(|v| v.as_str()).map(|s| s.to_string()),
                     }
                 }).collect();
                 if outcomes.is_empty() {
                     outcomes.push(MarketOutcome {
-                        name: "Yes".to_string(), price: odds, volume: total_volume,
+                        name: "Yes".to_string(),
+                        price: odds,
+                        volume: total_volume,
+                        yes_bid: None, yes_ask: None, no_bid: None, no_ask: None,
+                        open_interest: None, volume_24h: None,
+                        yes_sub_title: None, no_sub_title: None,
                     });
                 }
 
@@ -941,11 +954,17 @@ impl MarketFetcher {
                         name,
                         price: extract_poly_price(m),
                         volume: extract_poly_market_volume(m),
+                        yes_bid: None, yes_ask: None, no_bid: None, no_ask: None,
+                        open_interest: None, volume_24h: None,
+                        yes_sub_title: None, no_sub_title: None,
                     }
                 }).collect();
                 if outcomes.is_empty() {
                     outcomes.push(MarketOutcome {
                         name: "Yes".to_string(), price: odds, volume: total_vol,
+                        yes_bid: None, yes_ask: None, no_bid: None, no_ask: None,
+                        open_interest: None, volume_24h: None,
+                        yes_sub_title: None, no_sub_title: None,
                     });
                 }
 
@@ -964,7 +983,6 @@ impl MarketFetcher {
                     open_interest: 0.0,
                     icon_url: icon,
                     outcomes,
-                    status: "active".to_string(),
                     end_date,
                     market_url,
                     clob_token_yes,
