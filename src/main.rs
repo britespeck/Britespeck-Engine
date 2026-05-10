@@ -253,10 +253,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            println!("🟢 kalshi_ws: subscribing to {} tickers", kalshi_tickers.len());
+            // Kalshi WS needs market-level tickers with -Y suffix
+            // We store event tickers (KXNBAGAME-26MAY10NYKPHI)
+            // but WS needs market tickers (KXNBAGAME-26MAY10NYKPHI-Y)
+            let market_tickers: Vec<String> = kalshi_tickers.iter()
+                .map(|t| format!("{}-Y", t))
+                .collect();
+
+            println!("🟢 kalshi_ws: subscribing to {} tickers", market_tickers.len());
             if let Err(e) = fetchers::kalshi_ws::run_kalshi_ws_loop(
                 kalshi_pool.clone(),
-                kalshi_tickers,
+                market_tickers,
             ).await {
                 eprintln!("❌ kalshi_ws ended: {e} — reconnecting in 5s");
             }
