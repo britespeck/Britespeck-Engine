@@ -68,7 +68,16 @@ struct PatchIconBody {
     icon_url: String,
 }
 
-async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<PredictionEvent>> {
+#[derive(serde::Deserialize, Default)]
+struct PredictionEventsQuery {
+    live: Option<bool>,
+}
+
+async fn get_predictions(
+    State(pool): State<sqlx::PgPool>,
+    Query(params): Query<PredictionEventsQuery>,
+) -> Json<Vec<PredictionEvent>> {
+    let live_only = params.live.unwrap_or(false);
     let rows = sqlx::query_as::<_, PredictionEvent>(
         "SELECT id, title, platform, odds, category, status, icon_url, external_id,
                 volume_24h, updated_at, outcomes, market_url, end_date,
@@ -78,12 +87,20 @@ async fn get_predictions(State(pool): State<sqlx::PgPool>) -> Json<Vec<Predictio
            AND (end_date IS NULL OR end_date > NOW() - INTERVAL '24 hours')
            AND odds > 0.02
            AND odds < 0.98
+           AND (
+             $1::boolean = false 
+             OR (
+               category = 'Sports'
+               AND updated_at > NOW() - INTERVAL '5 minutes'
+             )
+           )
          ORDER BY 
            CASE WHEN status = 'active' THEN 0 ELSE 1 END,
            volume_24h DESC NULLS LAST
          LIMIT 10000"
     )
-    .fetch_all(&pool)
+    .bind(live_only)
+        .fetch_all(&pool)
     .await
     .unwrap_or_else(|e| {
         println!("❌ GET /prediction_events query failed: {}", e);

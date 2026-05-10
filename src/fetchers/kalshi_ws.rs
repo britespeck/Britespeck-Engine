@@ -91,6 +91,16 @@ pub async fn run_kalshi_ws_loop(pool: PgPool, tickers: Vec<String>) -> Result<()
     Ok(())
 }
 
+// Strip -Y or -N suffix from market ticker to get event ticker
+// Example: KXNBAGAME-26MAY09DETCLE-Y → KXNBAGAME-26MAY09DETCLE
+fn market_to_event_ticker(market_ticker: &str) -> &str {
+    if market_ticker.ends_with("-Y") || market_ticker.ends_with("-N") {
+        &market_ticker[..market_ticker.len() - 2]
+    } else {
+        market_ticker
+    }
+}
+
 async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
     let Some(ch) = v.get("type").and_then(|x| x.as_str()) else { return Ok(()) };
     let msg = v.get("msg").unwrap_or(&Value::Null);
@@ -99,7 +109,9 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
         "orderbook_snapshot" | "orderbook_delta" => {
             let ticker = msg.get("market_ticker").and_then(|x| x.as_str()).unwrap_or("");
             if ticker.is_empty() { return Ok(()); }
-            let event_id = format!("kalshi:{ticker}");
+            let event_ticker = market_to_event_ticker(ticker);
+            let event_id = format!("kalshi:{event_ticker}");
+            let market_id = format!("kalshi:{ticker}"); // full market ticker for orderbook
             let now = Utc::now();
 
             // yes side = bids, no side = asks (Kalshi prices are cents → 0..1)
@@ -124,6 +136,7 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
                 }
             }
             tx.commit().await?;
+            let _ = market_id; // suppress unused warning
 
             // ── Real-time price from orderbook best bid ────────────
             // Extract best yes bid price and update prediction_events
@@ -159,7 +172,8 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
         "trade" => {
             let ticker = msg.get("market_ticker").and_then(|x| x.as_str()).unwrap_or("");
             if ticker.is_empty() { return Ok(()); }
-            let event_id = format!("kalshi:{ticker}");
+            let event_ticker = market_to_event_ticker(ticker);
+            let event_id = format!("kalshi:{event_ticker}");
             let price = msg.get("yes_price").and_then(|x| x.as_f64()).unwrap_or(0.0) / 100.0;
             let size  = msg.get("count").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let side  = msg.get("taker_side").and_then(|x| x.as_str()); // "yes"|"no"
