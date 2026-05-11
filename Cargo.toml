@@ -37,11 +37,6 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
 async-trait = "0.1"
 
-# Kalshi Rust client (pbeets/kalshi-trade-rs)
-# Handles March 2026 fixed-point price migration
-# Provides ConnectStrategy::Retry, global &[] subscription
-# Correct WS channels: Ticker, Trade, OrderbookDelta, MarketLifecycle
-kalshi-trade-rs = "0.5"
 
 # Fastest Polymarket Rust client (floor-licker/polyfill-rs)
 # HTTP/2 with 512KB stream window (benchmarked 11.4% faster)
