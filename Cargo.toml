@@ -37,6 +37,10 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
 async-trait = "0.1"
 
+# Kalshi Rust client — handles March 2026 fixed-point migration,
+# correct WS subscription format, all 10 real-time channels
+kalshi-trade-rs = "0.5"
+
 # Misc
 regex = "1.12.3"
 urlencoding = "2"

@@ -1,221 +1,193 @@
-use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
-use rsa::{
-    pkcs1::DecodeRsaPrivateKey,
-    pkcs8::DecodePrivateKey,
-    pss::SigningKey,
-    signature::{RandomizedSigner, SignatureEncoding},
-    RsaPrivateKey,
-};
-use serde_json::{json, Value};
-use sha2::Sha256;
+//! Kalshi WebSocket client using kalshi-trade-rs crate.
+//! Handles the March 2026 fixed-point price migration automatically.
+//! Subscribes to Ticker + Orderbook channels for real-time prices.
+
+use anyhow::Result;
+use kalshi_trade_rs::{KalshiConfig, KalshiStreamClient, Channel, StreamMessage};
 use sqlx::PgPool;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, Message},
-};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-const WS_URL: &str = "wss://api.elections.kalshi.com/trade-api/ws/v2";
+use crate::live_prices::publish_price_update;
 
-fn load_key(pem: &str) -> Result<RsaPrivateKey> {
-    RsaPrivateKey::from_pkcs8_pem(pem)
-        .or_else(|_| RsaPrivateKey::from_pkcs1_pem(pem))
-        .context("parse Kalshi PEM (PKCS#8 or PKCS#1)")
-}
-
-fn sign_pss(key: &RsaPrivateKey, msg: &str) -> Result<String> {
-    let signing_key = SigningKey::<Sha256>::new(key.clone());
-    let mut rng = rand::thread_rng();
-    let sig = signing_key.sign_with_rng(&mut rng, msg.as_bytes());
-    Ok(B64.encode(sig.to_bytes()))
-}
-
-/// Connects to Kalshi's authenticated WS feed and streams orderbook + trade
-/// data into Postgres. Caller is responsible for restart-on-error.
+/// Run the Kalshi WebSocket loop using the kalshi-trade-rs crate.
+/// Caller is responsible for restart-on-error.
 pub async fn run_kalshi_ws_loop(pool: PgPool, tickers: Vec<String>) -> Result<()> {
     if tickers.is_empty() {
-        warn!("kalshi_ws: empty ticker list, nothing to subscribe to");
+        warn!("kalshi_ws: empty ticker list");
         return Ok(());
     }
 
-    let key_id = std::env::var("KALSHI_API_KEY_ID").context("KALSHI_API_KEY_ID")?;
-    let pem    = std::env::var("KALSHI_PRIVATE_KEY").context("KALSHI_PRIVATE_KEY")?;
-    let key    = load_key(&pem)?;
+    let config = KalshiConfig::from_env()?;
+    let client = KalshiStreamClient::connect(&config).await?;
+    let mut handle = client.handle();
 
-    let ts     = Utc::now().timestamp_millis().to_string();
-    let method = "GET";
-    let path   = "/trade-api/ws/v2";
-    let sig    = sign_pss(&key, &format!("{ts}{method}{path}"))?;
-
-    let mut req = WS_URL.into_client_request()?;
-    req.headers_mut().insert("KALSHI-ACCESS-KEY",       key_id.parse()?);
-    req.headers_mut().insert("KALSHI-ACCESS-TIMESTAMP", ts.parse()?);
-    req.headers_mut().insert("KALSHI-ACCESS-SIGNATURE", sig.parse()?);
-
-    let (mut ws, _) = connect_async(req).await.context("Kalshi WS connect")?;
     info!("✅ Kalshi WS connected ({} tickers)", tickers.len());
 
-    // Subscribe in batches of 50 to avoid oversized frames
-    let mut cmd_id = 1u64;
-    for chunk in tickers.chunks(50) {
-        let sub = json!({
-            "id": cmd_id,
-            "cmd": "subscribe",
-            "params": {
-                "channels": ["orderbook_delta", "trade"],
-                "market_tickers": chunk
-            }
-        });
-        ws.send(Message::Text(sub.to_string())).await?;
-        cmd_id += 1;
-    }
+    // Subscribe to ticker channel for live prices
+    // and orderbook channel for best bid/ask
+    let ticker_refs: Vec<&str> = tickers.iter().map(|s| s.as_str()).collect();
 
-    while let Some(msg) = ws.next().await {
-        match msg {
-            Ok(Message::Text(txt)) => {
-                if let Ok(v) = serde_json::from_str::<Value>(&txt) {
-                    if let Err(e) = handle_msg(&pool, &v).await {
-                        warn!("kalshi msg handle err: {e}");
+    handle.subscribe(Channel::Ticker, &ticker_refs).await?;
+    handle.subscribe(Channel::Orderbook, &ticker_refs).await?;
+    handle.subscribe(Channel::Trade, &ticker_refs).await?;
+
+    loop {
+        match handle.update_receiver.recv().await {
+            Ok(update) => {
+                match &update.msg {
+                    StreamMessage::Ticker(t) => {
+                        // price_dollars is already in 0.0-1.0 format
+                        let price: f64 = t.price_dollars.parse().unwrap_or(0.0);
+                        let event_id = format!("kalshi:{}", strip_market_suffix(&t.market_ticker));
+
+                        if price > 0.01 && price < 0.99 {
+                            sqlx::query(
+                                "UPDATE public.prediction_events
+                                 SET odds = $1, updated_at = NOW()
+                                 WHERE external_id = $2
+                                   AND status = 'active'"
+                            )
+                            .bind(price)
+                            .bind(&event_id)
+                            .execute(&pool)
+                            .await
+                            .ok();
+
+                            publish_price_update(&event_id, &event_id, "Kalshi", price);
+                        }
                     }
+
+                    StreamMessage::Orderbook(ob) => {
+                        // Get best yes bid from orderbook
+                        let event_id = format!("kalshi:{}", strip_market_suffix(&ob.market_ticker));
+
+                        let best_bid = ob.yes_bids
+                            .first()
+                            .and_then(|b| b.price_dollars.parse::<f64>().ok());
+
+                        if let Some(price) = best_bid {
+                            if price > 0.01 && price < 0.99 {
+                                sqlx::query(
+                                    "UPDATE public.prediction_events
+                                     SET odds = $1, updated_at = NOW()
+                                     WHERE external_id = $2
+                                       AND status = 'active'"
+                                )
+                                .bind(price)
+                                .bind(&event_id)
+                                .execute(&pool)
+                                .await
+                                .ok();
+
+                                publish_price_update(&event_id, &event_id, "Kalshi", price);
+
+                                // Save orderbook snapshot
+                                save_orderbook_snapshot(&pool, &event_id, &ob.market_ticker, ob).await;
+                            }
+                        }
+                    }
+
+                    StreamMessage::Trade(t) => {
+                        // Save to trades_tape
+                        let price: f64 = t.price_dollars.parse().unwrap_or(0.0);
+                        let event_id = format!("kalshi:{}", strip_market_suffix(&t.market_ticker));
+
+                        if price > 0.0 {
+                            // Update odds from trade price
+                            let yes_price = if t.taker_side.as_deref() == Some("yes") {
+                                price
+                            } else {
+                                1.0 - price
+                            };
+
+                            if yes_price > 0.01 && yes_price < 0.99 {
+                                sqlx::query(
+                                    "UPDATE public.prediction_events
+                                     SET odds = $1, updated_at = NOW()
+                                     WHERE external_id = $2
+                                       AND status = 'active'"
+                                )
+                                .bind(yes_price)
+                                .bind(&event_id)
+                                .execute(&pool)
+                                .await
+                                .ok();
+
+                                publish_price_update(&event_id, &event_id, "Kalshi", yes_price);
+                            }
+
+                            // Insert into trades_tape
+                            sqlx::query(
+                                "INSERT INTO trades_tape
+                                 (event_id, platform, market_id, side, taker_side, price, size, trade_timestamp)
+                                 VALUES ($1, 'Kalshi', $2, $3, $4, $5, $6, NOW())
+                                 ON CONFLICT DO NOTHING"
+                            )
+                            .bind(&event_id)
+                            .bind(&t.market_ticker)
+                            .bind(t.taker_side.as_deref().unwrap_or("yes"))
+                            .bind(t.taker_side.as_deref().unwrap_or("yes"))
+                            .bind(price)
+                            .bind(t.count as f64)
+                            .execute(&pool)
+                            .await
+                            .ok();
+                        }
+                    }
+
+                    _ => {} // Ignore other message types
                 }
             }
-            Ok(Message::Ping(p)) => { let _ = ws.send(Message::Pong(p)).await; }
-            Ok(Message::Close(_)) => { warn!("Kalshi WS closed"); break; }
-            Err(e) => { error!("Kalshi WS err: {e}"); break; }
-            _ => {}
+            Err(e) => {
+                warn!("Kalshi WS recv error: {e}");
+                break;
+            }
         }
     }
+
     Ok(())
 }
 
-// Strip -Y or -N suffix from market ticker to get event ticker
-// Example: KXNBAGAME-26MAY09DETCLE-Y → KXNBAGAME-26MAY09DETCLE
-fn market_to_event_ticker(market_ticker: &str) -> &str {
-    if market_ticker.ends_with("-Y") || market_ticker.ends_with("-N") {
-        &market_ticker[..market_ticker.len() - 2]
+/// Strip -Y or -N suffix from market ticker to get event ticker
+/// KXNBAGAME-26MAY10NYKPHI-Y → KXNBAGAME-26MAY10NYKPHI
+fn strip_market_suffix(ticker: &str) -> &str {
+    if ticker.ends_with("-Y") || ticker.ends_with("-N") {
+        &ticker[..ticker.len() - 2]
     } else {
-        market_ticker
+        ticker
     }
 }
 
-async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
-    let Some(ch) = v.get("type").and_then(|x| x.as_str()) else { return Ok(()) };
-    let msg = v.get("msg").unwrap_or(&Value::Null);
+async fn save_orderbook_snapshot(
+    pool: &PgPool,
+    event_id: &str,
+    market_ticker: &str,
+    ob: &kalshi_trade_rs::ws::messages::OrderbookMessage,
+) {
+    let now = chrono::Utc::now();
+    let mut tx = match pool.begin().await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
 
-    match ch {
-        "orderbook_snapshot" | "orderbook_delta" => {
-            let ticker = msg.get("market_ticker").and_then(|x| x.as_str()).unwrap_or("");
-            if ticker.is_empty() { return Ok(()); }
-            let event_ticker = market_to_event_ticker(ticker);
-            let event_id = format!("kalshi:{event_ticker}");
-            let market_id = format!("kalshi:{ticker}"); // full market ticker for orderbook
-            let now = Utc::now();
+    sqlx::query("DELETE FROM orderbook_snapshots WHERE event_id = $1 AND platform = 'Kalshi'")
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await
+        .ok();
 
-            // yes side = bids, no side = asks (Kalshi prices are cents → 0..1)
-            let mut tx = pool.begin().await?;
-            sqlx::query("DELETE FROM orderbook_snapshots WHERE event_id = $1")
-                .bind(&event_id).execute(&mut *tx).await?;
-
-            for (side_in, side_out) in [("yes", "bid"), ("no", "ask")] {
-                if let Some(levels) = msg.get(side_in).and_then(|x| x.as_array()) {
-                    for (i, lvl) in levels.iter().take(10).enumerate() {
-                        let price = lvl.get(0).and_then(|x| x.as_f64()).unwrap_or(0.0) / 100.0;
-                        let size  = lvl.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0);
-                        sqlx::query(
-                            "INSERT INTO orderbook_snapshots
-                             (event_id, platform, token_id, side, price, size, level, captured_at)
-                             VALUES ($1,'Kalshi',$2,$3,$4,$5,$6,$7)"
-                        )
-                        .bind(&event_id).bind(ticker).bind(side_out)
-                        .bind(price).bind(size).bind(i as i32).bind(now)
-                        .execute(&mut *tx).await?;
-                    }
-                }
-            }
-            tx.commit().await?;
-            let _ = market_id; // suppress unused warning
-
-            // ── Real-time price from orderbook best bid ────────────
-            // Extract best yes bid price and update prediction_events
-            // This fires on every orderbook update — much more frequent than trades
-            if let Some(yes_levels) = msg.get("yes").and_then(|x| x.as_array()) {
-                if let Some(best_bid) = yes_levels.first() {
-                    let bid_price = best_bid.get(0)
-                        .and_then(|x| x.as_f64())
-                        .map(|p| p / 100.0)
-                        .unwrap_or(0.0);
-
-                    if bid_price > 0.0 && bid_price < 1.0 {
-                        sqlx::query(
-                            "UPDATE public.prediction_events
-                             SET odds = $1, updated_at = NOW()
-                             WHERE external_id = $2
-                               AND status = 'active'"
-                        )
-                        .bind(bid_price)
-                        .bind(&event_id)
-                        .execute(pool)
-                        .await
-                        .ok();
-
-                        // Broadcast to SSE clients instantly
-                        crate::live_prices::publish_price_update(
-                            &event_id, &event_id, "Kalshi", bid_price
-                        );
-                    }
-                }
-            }
-        }
-        "trade" => {
-            let ticker = msg.get("market_ticker").and_then(|x| x.as_str()).unwrap_or("");
-            if ticker.is_empty() { return Ok(()); }
-            let event_ticker = market_to_event_ticker(ticker);
-            let event_id = format!("kalshi:{event_ticker}");
-            let price = msg.get("yes_price").and_then(|x| x.as_f64()).unwrap_or(0.0) / 100.0;
-            let size  = msg.get("count").and_then(|x| x.as_f64()).unwrap_or(0.0);
-            let side  = msg.get("taker_side").and_then(|x| x.as_str()); // "yes"|"no"
-            let trade_side = match side {
-                Some("yes") => "buy",
-                Some("no")  => "sell",
-                _ => "buy",
-            };
-            let ts_secs = msg.get("ts").and_then(|x| x.as_i64()).unwrap_or(0);
-            let ts = chrono::DateTime::from_timestamp(ts_secs, 0).unwrap_or_else(Utc::now);
-
-            // ── Real-time price update ─────────────────────────────
-            // Update prediction_events.odds immediately on every trade
-            // so Britespeck shows live prices matching Kalshi's interface
-            if price > 0.0 && price < 1.0 {
-                sqlx::query(
-                    "UPDATE public.prediction_events
-                     SET odds = $1, updated_at = NOW()
-                     WHERE external_id = $2
-                       AND status = 'active'"
-                )
-                .bind(price)
-                .bind(&event_id)
-                .execute(pool)
-                .await
-                .ok(); // Non-fatal — don't fail the whole handler on miss
-
-                // Broadcast to SSE clients instantly
-                crate::live_prices::publish_price_update(
-                    &event_id, &event_id, "Kalshi", price
-                );
-            }
-
-            sqlx::query(
-                "INSERT INTO trades_tape (event_id, platform, token_id, side, price, size, trade_timestamp)
-                 VALUES ($1,'Kalshi',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING"
-            )
-            .bind(&event_id).bind(ticker).bind(trade_side)
-            .bind(price).bind(size).bind(ts)
-            .execute(pool).await?;
-        }
-        _ => {}
+    for (i, bid) in ob.yes_bids.iter().take(10).enumerate() {
+        let price: f64 = bid.price_dollars.parse().unwrap_or(0.0);
+        let size: f64 = bid.quantity_dollars.parse().unwrap_or(0.0);
+        sqlx::query(
+            "INSERT INTO orderbook_snapshots
+             (event_id, platform, token_id, side, price, size, level, captured_at)
+             VALUES ($1,'Kalshi',$2,'bid',$3,$4,$5,$6)"
+        )
+        .bind(event_id).bind(market_ticker)
+        .bind(price).bind(size).bind(i as i32).bind(now)
+        .execute(&mut *tx).await.ok();
     }
-    Ok(())
+
+    tx.commit().await.ok();
 }
