@@ -38,11 +38,6 @@ futures-util = "0.3"
 async-trait = "0.1"
 
 
-# Fastest Polymarket Rust client (floor-licker/polyfill-rs)
-# HTTP/2 with 512KB stream window (benchmarked 11.4% faster)
-# Built-in keep-alive, connection pooling, buffer pool
-# OrderBook with fixed-point math: spread_fast(), mid_price_fast()
-polyfill-rs = "0.1"
 
 # Misc
 regex = "1.12.3"

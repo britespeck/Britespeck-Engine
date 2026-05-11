@@ -55,11 +55,6 @@ struct LocalBook {
 pub async fn run_polymarket_clob_loop(pool: PgPool) {
     tracing::info!("📡 Starting Polymarket CLOB WS loop");
 
-    // Start keep-alive for faster REST market fetches
-    let client = get_poly_client();
-    client.start_keepalive(Duration::from_secs(30)).await;
-    tracing::info!("⚡ Polymarket keep-alive started");
-
     loop {
         let watchlist = match load_watchlist(&pool).await {
             Ok(w) if !w.is_empty() => w,
