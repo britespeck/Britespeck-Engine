@@ -1,23 +1,32 @@
 //! Kalshi WebSocket real-time price feed.
 //!
-//! Built using insights from pbeets/kalshi-trade-rs:
-//! - Subscribe to ALL markets with empty ticker list
-//! - price_dollars is a string "0.6500" (March 2026 migration)
-//! - yes_price_dollars for trades
-//! - yes_dollars_fp for orderbook levels
-//! - Auto-reconnect loop in main.rs
+//! Auth: RSA-PSS signature in HTTP upgrade headers (NOT a message)
+//! Pattern from taetaehoho/poly-kalshi-arb kalshi.rs
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use pkcs1::DecodeRsaPrivateKey;
+use rsa::{
+    pss::SigningKey,
+    sha2::Sha256,
+    signature::{RandomizedSigner, SignatureEncoding},
+    RsaPrivateKey,
+};
+use serde_json::Value;
 use sqlx::PgPool;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{http::Request, Message},
+};
 use tracing::{info, warn};
 
 use crate::live_prices::publish_price_update;
 
+const KALSHI_WS_URL: &str = "wss://api.elections.kalshi.com/trade-api/ws/v2";
+
 /// Strip -Y or -N suffix from market ticker to get event ticker
-/// KXNBAGAME-26MAY10NYKPHI-Y → KXNBAGAME-26MAY10NYKPHI
 fn market_to_event_ticker(ticker: &str) -> &str {
     if ticker.ends_with("-Y") || ticker.ends_with("-N") {
         &ticker[..ticker.len() - 2]
@@ -28,7 +37,6 @@ fn market_to_event_ticker(ticker: &str) -> &str {
 
 /// Parse price from Kalshi's March 2026 fixed-point format
 /// New format: "0.6500" (string) — NO division needed
-/// Old format: 65 (integer cents) — divide by 100
 fn parse_kalshi_price(value: &Value) -> f64 {
     if let Some(s) = value.as_str() {
         s.parse::<f64>().unwrap_or(0.0)
@@ -39,61 +47,79 @@ fn parse_kalshi_price(value: &Value) -> f64 {
     }
 }
 
-pub async fn run_kalshi_ws_loop(pool: PgPool, _tickers: Vec<String>) -> Result<()> {
-    let api_key = std::env::var("KALSHI_API_TOKEN").unwrap_or_default();
-    let ws_url = "wss://api.elections.kalshi.com/trade-api/ws/v2";
+/// Sign message with RSA-PSS using the Kalshi private key
+fn sign_kalshi(private_key: &RsaPrivateKey, message: &str) -> Result<String> {
+    let signing_key = SigningKey::<Sha256>::new(private_key.clone());
+    let signature = signing_key.sign_with_rng(&mut rand::thread_rng(), message.as_bytes());
+    Ok(BASE64.encode(signature.to_bytes()))
+}
 
-    info!("🔌 Kalshi WS connecting to {}", ws_url);
+pub async fn run_kalshi_ws_loop(pool: PgPool, tickers: Vec<String>) -> Result<()> {
+    // Load credentials — same env vars as the REST fetcher
+    let api_key_id = std::env::var("KALSHI_API_KEY_ID")
+        .context("KALSHI_API_KEY_ID not set")?;
 
-    let (mut ws, _) = connect_async(ws_url).await?;
-    info!("✅ Kalshi WS connected");
+    let key_path = std::env::var("KALSHI_PRIVATE_KEY_PATH")
+        .or_else(|_| std::env::var("KALSHI_PRIVATE_KEY_FILE"))
+        .unwrap_or_else(|_| "kalshi_private_key.txt".to_string());
 
-    // Authenticate
-    let auth_msg = json!({
+    let pem = std::fs::read_to_string(&key_path)
+        .with_context(|| format!("Failed to read Kalshi key from {}", key_path))?;
+
+    let private_key = RsaPrivateKey::from_pkcs1_pem(pem.trim())
+        .context("Failed to parse Kalshi RSA private key")?;
+
+    info!("🔌 Kalshi WS connecting to {}", KALSHI_WS_URL);
+
+    // Build RSA signature for the HTTP upgrade request
+    // Format: "{timestamp_ms}GET/trade-api/ws/v2"
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis()
+        .to_string();
+
+    let msg_to_sign = format!("{}GET/trade-api/ws/v2", timestamp_ms);
+    let signature = sign_kalshi(&private_key, &msg_to_sign)?;
+
+    // Build the WebSocket upgrade request with auth headers
+    // This is how Kalshi WS v2 authenticates — in the HTTP headers, not a message
+    let request = Request::builder()
+        .uri(KALSHI_WS_URL)
+        .header("KALSHI-ACCESS-KEY", &api_key_id)
+        .header("KALSHI-ACCESS-SIGNATURE", &signature)
+        .header("KALSHI-ACCESS-TIMESTAMP", &timestamp_ms)
+        .header("Host", "api.elections.kalshi.com")
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .body(())?;
+
+    let (ws_stream, _) = connect_async(request)
+        .await
+        .context("Failed to connect to Kalshi WS")?;
+
+    info!("✅ Kalshi WS authenticated and connected");
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Subscribe — use provided tickers or all if empty
+    let sub_msg = serde_json::json!({
         "id": 1,
-        "cmd": "auth",
-        "params": {
-            "token": api_key
-        }
-    });
-    ws.send(Message::Text(auth_msg.to_string())).await?;
-
-    // Subscribe to ALL markets globally using empty array
-    // Key insight from pbeets/kalshi-trade-rs stream_firehose.rs:
-    // passing empty array subscribes to ALL markets
-    let sub_ticker = json!({
-        "id": 2,
         "cmd": "subscribe",
         "params": {
-            "channels": ["ticker"],
-            "market_tickers": []
+            "channels": ["orderbook_delta", "ticker", "trade"],
+            "market_tickers": tickers
         }
     });
-    ws.send(Message::Text(sub_ticker.to_string())).await?;
 
-    let sub_trade = json!({
-        "id": 3,
-        "cmd": "subscribe",
-        "params": {
-            "channels": ["trade"],
-            "market_tickers": []
-        }
-    });
-    ws.send(Message::Text(sub_trade.to_string())).await?;
+    write.send(Message::Text(sub_msg.to_string())).await?;
+    info!("📡 Kalshi WS subscribed to {} tickers", if tickers.is_empty() { "ALL".to_string() } else { tickers.len().to_string() });
 
-    let sub_orderbook = json!({
-        "id": 4,
-        "cmd": "subscribe",
-        "params": {
-            "channels": ["orderbook_delta"],
-            "market_tickers": []
-        }
-    });
-    ws.send(Message::Text(sub_orderbook.to_string())).await?;
-
-    info!("📡 Kalshi WS subscribed: ticker + trade + orderbook_delta (global)");
-
-    while let Some(msg) = ws.next().await {
+    while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&text) {
@@ -103,7 +129,7 @@ pub async fn run_kalshi_ws_loop(pool: PgPool, _tickers: Vec<String>) -> Result<(
                 }
             }
             Ok(Message::Ping(data)) => {
-                ws.send(Message::Pong(data)).await.ok();
+                write.send(Message::Pong(data)).await.ok();
             }
             Ok(Message::Close(_)) => {
                 warn!("Kalshi WS closed by server");
@@ -126,7 +152,6 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
 
     match msg_type {
         "ticker" => {
-            // price_dollars = "0.6500" — March 2026 format, already 0-1 range
             let price = msg.get("yes_bid_dollars")
                 .or_else(|| msg.get("price_dollars"))
                 .or_else(|| msg.get("yes_price_dollars"))
@@ -140,8 +165,7 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
 
             if ticker.is_empty() || price < 0.01 || price > 0.99 { return Ok(()); }
 
-            let event_ticker = market_to_event_ticker(ticker);
-            let event_id = format!("kalshi:{}", event_ticker);
+            let event_id = format!("kalshi:{}", market_to_event_ticker(ticker));
 
             let r = sqlx::query(
                 "UPDATE public.prediction_events
@@ -159,7 +183,6 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
         }
 
         "trade" => {
-            // yes_price_dollars = "0.6500" — March 2026 format
             let price = msg.get("yes_price_dollars")
                 .or_else(|| msg.get("price_dollars"))
                 .or_else(|| msg.get("yes_price"))
@@ -172,8 +195,7 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
 
             if ticker.is_empty() || price < 0.01 || price > 0.99 { return Ok(()); }
 
-            let event_ticker = market_to_event_ticker(ticker);
-            let event_id = format!("kalshi:{}", event_ticker);
+            let event_id = format!("kalshi:{}", market_to_event_ticker(ticker));
 
             sqlx::query(
                 "UPDATE public.prediction_events
@@ -187,13 +209,8 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
 
             publish_price_update(&event_id, &event_id, "Kalshi", price);
 
-            // Save to trades_tape
-            let taker_side = msg.get("taker_side")
-                .and_then(|x| x.as_str())
-                .unwrap_or("yes");
-            let size = msg.get("count")
-                .and_then(|x| x.as_f64())
-                .unwrap_or(0.0);
+            let taker_side = msg.get("taker_side").and_then(|x| x.as_str()).unwrap_or("yes");
+            let size = msg.get("count").and_then(|x| x.as_f64()).unwrap_or(0.0);
 
             sqlx::query(
                 "INSERT INTO trades_tape
@@ -201,15 +218,10 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
                  VALUES ($1, 'Kalshi', $2, $3, $4, $5, $6, NOW())
                  ON CONFLICT DO NOTHING"
             )
-            .bind(&event_id)
-            .bind(ticker)
-            .bind(taker_side)
-            .bind(taker_side)
-            .bind(price)
-            .bind(size)
-            .execute(pool)
-            .await
-            .ok();
+            .bind(&event_id).bind(ticker)
+            .bind(taker_side).bind(taker_side)
+            .bind(price).bind(size)
+            .execute(pool).await.ok();
         }
 
         "orderbook_delta" | "orderbook_snapshot" => {
@@ -219,30 +231,23 @@ async fn handle_msg(pool: &PgPool, v: &Value) -> Result<()> {
 
             if ticker.is_empty() { return Ok(()); }
 
-            let event_ticker = market_to_event_ticker(ticker);
-            let event_id = format!("kalshi:{}", event_ticker);
+            let event_id = format!("kalshi:{}", market_to_event_ticker(ticker));
 
-            // yes_dollars_fp = [["0.6500", "100.00"], ...] — March 2026 format
             let yes_levels = msg.get("yes_dollars_fp")
                 .or_else(|| msg.get("yes"))
                 .and_then(|x| x.as_array());
 
             if let Some(levels) = yes_levels {
                 if let Some(best) = levels.first() {
-                    let price = best.get(0)
-                        .map(parse_kalshi_price)
-                        .unwrap_or(0.0);
-
+                    let price = best.get(0).map(parse_kalshi_price).unwrap_or(0.0);
                     if price > 0.01 && price < 0.99 {
                         sqlx::query(
                             "UPDATE public.prediction_events
                              SET odds = $1, updated_at = NOW()
                              WHERE external_id = $2 AND status = 'active'"
                         )
-                        .bind(price)
-                        .bind(&event_id)
-                        .execute(pool)
-                        .await?;
+                        .bind(price).bind(&event_id)
+                        .execute(pool).await?;
 
                         publish_price_update(&event_id, &event_id, "Kalshi", price);
                     }
