@@ -3,7 +3,6 @@
 
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
-use polyfill_rs::ClobClient;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -12,14 +11,7 @@ use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
-// Global keep-alive Polymarket client — faster REST fetches
-fn get_poly_client() -> &'static ClobClient {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<ClobClient> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        ClobClient::new("https://clob.polymarket.com")
-    })
-}
+
 
 const WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const WATCHLIST_SIZE: i64 = 200;
