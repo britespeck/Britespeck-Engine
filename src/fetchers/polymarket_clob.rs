@@ -3,6 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
+use polyfill_rs::ClobClient;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -10,6 +11,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
+
+// Global keep-alive Polymarket client — faster REST fetches
+fn get_poly_client() -> &'static ClobClient {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<ClobClient> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        ClobClient::new("https://clob.polymarket.com")
+    })
+}
 
 const WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const WATCHLIST_SIZE: i64 = 200;
@@ -44,6 +54,12 @@ struct LocalBook {
 
 pub async fn run_polymarket_clob_loop(pool: PgPool) {
     tracing::info!("📡 Starting Polymarket CLOB WS loop");
+
+    // Start keep-alive for faster REST market fetches
+    let client = get_poly_client();
+    client.start_keepalive(Duration::from_secs(30)).await;
+    tracing::info!("⚡ Polymarket keep-alive started");
+
     loop {
         let watchlist = match load_watchlist(&pool).await {
             Ok(w) if !w.is_empty() => w,
