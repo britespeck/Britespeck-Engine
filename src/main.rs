@@ -225,6 +225,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Polymarket CLOB websocket (public, no auth)
     tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
 
+    // ── Fast Kalshi Price Refresh (every 60s, top 100 markets) ───────
+    {
+        let fast_pool = api_pool.clone();
+        let fast_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .user_agent("Britespeck/1.0")
+            .build()
+            .unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+
+                // Get top 100 active Kalshi markets by volume
+                let top_markets: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+                    "SELECT id, external_id FROM public.prediction_events
+                     WHERE platform = 'Kalshi' AND status = 'active'
+                     ORDER BY volume_24h DESC NULLS LAST LIMIT 100"
+                )
+                .fetch_all(&fast_pool)
+                .await
+                .unwrap_or_default();
+
+                let token = std::env::var("KALSHI_API_TOKEN").unwrap_or_default();
+                let mut updated = 0u32;
+
+                for (id, external_id) in &top_markets {
+                    let ticker = external_id.replace("kalshi:", "");
+                    let url = format!(
+                        "https://api.elections.kalshi.com/trade-api/v2/markets/{}",
+                        ticker
+                    );
+
+                    if let Ok(resp) = fast_client.get(&url)
+                        .header("Authorization", format!("Bearer {}", token))
+                        .send().await
+                    {
+                        if let Ok(data) = resp.json::<serde_json::Value>().await {
+                            let yes_bid = data.get("market")
+                                .and_then(|m| m.get("yes_bid"))
+                                .and_then(|v| v.as_f64())
+                                .map(|p| p / 100.0);
+
+                            if let Some(price) = yes_bid {
+                                if price > 0.01 && price < 0.99 {
+                                    sqlx::query(
+                                        "UPDATE public.prediction_events
+                                         SET odds = $1, updated_at = NOW()
+                                         WHERE id = $2"
+                                    )
+                                    .bind(price)
+                                    .bind(id)
+                                    .execute(&fast_pool)
+                                    .await
+                                    .ok();
+
+                                    crate::live_prices::publish_price_update(
+                                        external_id, external_id, "Kalshi", price
+                                    );
+                                    updated += 1;
+                                }
+                            }
+                        }
+                    }
+                    // 200ms delay — 100 markets = 20 seconds total, well within rate limits
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                tracing::info!("⚡ Fast Kalshi refresh: {} markets updated", updated);
+            }
+        });
+    }
+
     // Kalshi WebSocket — strip "kalshi:" prefix before passing to ws loop
     let kalshi_pool = api_pool.clone();
     tokio::spawn(async move {
@@ -478,8 +550,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("⚠️ OMG Strategy Warning: {}", e);
             }
 
-            println!("💤 Sleeping 30s...");
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            println!("💤 Sleeping 60s...");
+            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
 
