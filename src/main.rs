@@ -15,6 +15,7 @@ mod strategy_signals;
 mod contract_parser;
 mod player_stats;
 mod live_prices;
+mod arb_detector;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -171,6 +172,20 @@ async fn patch_event_icon(
     }
 }
 
+
+/// GET /arb_signals — returns active arbitrage signals
+async fn get_arb_signals_handler(
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> impl axum::response::IntoResponse {
+    match arb_detector::get_active_arb_signals(&pool).await {
+        Ok(signals) => axum::Json(serde_json::json!({ "signals": signals, "count": signals.len() })).into_response(),
+        Err(e) => {
+            tracing::error!("arb_signals error: {}", e);
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "error").into_response()
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv();
@@ -198,6 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/prediction_events", get(get_predictions))
+        .route("/arb_signals", get(get_arb_signals_handler))
         .route("/prediction_events/:id/icon", patch(patch_event_icon))
         .route("/index_history", get(get_index_history))
         .route("/backtest", get(get_backtest))
@@ -325,17 +341,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            // Kalshi WS needs market-level tickers with -Y suffix
-            // We store event tickers (KXNBAGAME-26MAY10NYKPHI)
-            // but WS needs market tickers (KXNBAGAME-26MAY10NYKPHI-Y)
-            let market_tickers: Vec<String> = kalshi_tickers.iter()
-                .map(|t| format!("{}-Y", t))
-                .collect();
-
-            println!("🟢 kalshi_ws: subscribing to {} tickers", market_tickers.len());
+            // kalshi_ws now uses global subscription (&[]) internally
+            // subscribes to ALL Kalshi markets via Channel::Ticker, Trade, OrderbookDelta
+            // No need to pass tickers — learned from pbeets stream_firehose.rs
+            println!("🟢 kalshi_ws: connecting with global subscription");
             if let Err(e) = fetchers::kalshi_ws::run_kalshi_ws_loop(
                 kalshi_pool.clone(),
-                market_tickers,
+                vec![],
             ).await {
                 eprintln!("❌ kalshi_ws ended: {e} — reconnecting in 5s");
             }
