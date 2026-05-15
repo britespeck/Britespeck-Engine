@@ -22,4 +22,4 @@
     COPY --from=builder /usr/src/app/target/release/britespeck_engine /usr/local/bin/rust-engine
     
     # Start the engine
-    CMD ["rust-engine"]
+    CMD ["rust-engine"]# cache bust Fri May 15 15:51:28 EDT 2026
