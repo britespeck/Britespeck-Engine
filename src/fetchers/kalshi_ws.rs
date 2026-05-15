@@ -52,13 +52,13 @@ fn sign_kalshi(private_key: &RsaPrivateKey, message: &str) -> Result<String> {
 
 pub async fn run_kalshi_ws_loop(pool: PgPool, tickers: Vec<String>) -> Result<()> {
     // DEBUG — log env vars to diagnose 401
-    info!("KALSHI_API_KEY_ID = {:?}", std::env::var("KALSHI_API_KEY_ID"));
+    info!("KALSHI_API_TOKEN = {:?}", std::env::var("KALSHI_API_TOKEN"));
     info!("KALSHI_PRIVATE_KEY set = {}", std::env::var("KALSHI_PRIVATE_KEY").is_ok());
     info!("KALSHI_PRIVATE_KEY_PATH = {:?}", std::env::var("KALSHI_PRIVATE_KEY_PATH"));
 
     // Load API key ID
-    let api_key_id = std::env::var("KALSHI_API_KEY_ID")
-        .context("KALSHI_API_KEY_ID not set")?;
+    let api_key_id = std::env::var("KALSHI_API_TOKEN")
+        .context("KALSHI_API_TOKEN not set")?;
 
     // Load private key — try env var first, then file path
     let pem = std::env::var("KALSHI_PRIVATE_KEY")
