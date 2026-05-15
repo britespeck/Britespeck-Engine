@@ -38,9 +38,6 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
 async-trait = "0.1"
 
-# Polymarket Official SDK
-polymarket-client-sdk-v2 = "2"
-
 # Misc
 regex = "1.12.3"
 urlencoding = "2"
