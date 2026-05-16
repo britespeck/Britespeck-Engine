@@ -280,7 +280,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {
                         if let Ok(data) = resp.json::<serde_json::Value>().await {
                             let yes_bid = data.get("market")
-                                .and_then(|m| m.get("yes_bid"))
+                                .and_then(|m| m.get("yes_bid_dollars").or_else(|| m.get("yes_bid")))
                                 .and_then(|v| {
                                     if let Some(s) = v.as_str() {
                                         s.parse::<f64>().ok()
