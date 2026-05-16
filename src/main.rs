@@ -102,7 +102,7 @@ async fn get_predictions(
            CASE WHEN updated_at > NOW() - INTERVAL '5 minutes' THEN 0 ELSE 1 END,
            -- Then by volume
            volume_24h DESC NULLS LAST
-         LIMIT 10000"
+         LIMIT 20000"
     )
     .bind(live_only)
         .fetch_all(&pool)
@@ -132,7 +132,7 @@ async fn get_backtest(
 
 async fn get_index_history(State(pool): State<sqlx::PgPool>) -> Json<Vec<IndexHistoryEntry>> {
     let rows = sqlx::query_as::<_, IndexHistoryEntry>(
-        "SELECT value, market_count, timestamp FROM public.index_history ORDER BY timestamp DESC LIMIT 100"
+        "SELECT value, market_count, timestamp FROM public.index_history ORDER BY timestamp DESC LIMIT 200"
     )
     .fetch_all(&pool)
     .await
@@ -258,7 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let top_markets: Vec<(uuid::Uuid, String)> = sqlx::query_as(
                     "SELECT id, external_id FROM public.prediction_events
                      WHERE platform = 'Kalshi' AND status = 'active'
-                     ORDER BY volume_24h DESC NULLS LAST LIMIT 100"
+                     ORDER BY volume_24h DESC NULLS LAST LIMIT 200"
                 )
                 .fetch_all(&fast_pool)
                 .await
