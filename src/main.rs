@@ -252,7 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(Duration::from_secs(15)).await;
 
                 // Get top 100 active Kalshi markets by volume
                 let top_markets: Vec<(uuid::Uuid, String)> = sqlx::query_as(
@@ -563,7 +563,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             println!("💤 Sleeping 60s...");
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(Duration::from_secs(15)).await;
         }
     });
 
