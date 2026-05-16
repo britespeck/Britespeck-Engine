@@ -281,8 +281,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Ok(data) = resp.json::<serde_json::Value>().await {
                             let yes_bid = data.get("market")
                                 .and_then(|m| m.get("yes_bid"))
-                                .and_then(|v| v.as_f64())
-                                .map(|p| p / 100.0);
+                                .and_then(|v| {
+                                    if let Some(s) = v.as_str() {
+                                        s.parse::<f64>().ok()
+                                    } else {
+                                        v.as_f64().map(|p| if p > 1.0 { p / 100.0 } else { p })
+                                    }
+                                });
 
                             if let Some(price) = yes_bid {
                                 if price > 0.01 && price < 0.99 {
