@@ -257,7 +257,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Get top 100 active Kalshi markets by volume
                 let top_markets: Vec<(uuid::Uuid, String)> = sqlx::query_as(
                     "SELECT id, external_id FROM public.prediction_events
-                     WHERE platform = 'Kalshi' AND status = 'active'
+                     WHERE platform = 'Kalshi' AND status = 'active' AND (end_date IS NULL OR end_date > NOW())
                      ORDER BY volume_24h DESC NULLS LAST LIMIT 200"
                 )
                 .fetch_all(&fast_pool)
