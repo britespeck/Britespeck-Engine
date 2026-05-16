@@ -274,11 +274,11 @@ async fn persist_trade(pool: &PgPool, event_id: &str, price: f64, size: f64, sid
 
     sqlx::query(
         "INSERT INTO public.raw_trades
-            (id, event_id, platform, price, size, side, trade_timestamp, ingested_at)
-         VALUES ($1, $2, 'Polymarket', $3, $4, $5, NOW(), NOW())
+            (event_id, platform, price, size, side, trade_timestamp, ingested_at)
+         VALUES ($1, 'Polymarket', $2, $3, $4, NOW(), NOW())
          ON CONFLICT (event_id, platform, trade_timestamp, price, size) DO NOTHING"
     )
-    .bind(Uuid::new_v4()).bind(event_id).bind(price).bind(size).bind(side.as_deref())
+    .bind(event_id).bind(price).bind(size).bind(side.as_deref())
     .execute(pool).await?;
     Ok(())
 }
