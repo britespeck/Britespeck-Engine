@@ -306,7 +306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     // 200ms delay — 100 markets = 20 seconds total, well within rate limits
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 tracing::info!("⚡ Fast Kalshi refresh: {} markets updated", updated);
             }
