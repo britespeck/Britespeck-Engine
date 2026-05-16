@@ -275,7 +275,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
 
                     if let Ok(resp) = fast_client.get(&url)
-                        .header("Authorization", format!("Bearer {}", token))
+                        //.header("Authorization", format!("Bearer {}", token))
                         .send().await
                     {
                         if let Ok(data) = resp.json::<serde_json::Value>().await {
