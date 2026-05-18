@@ -312,11 +312,11 @@ pub async fn persist_signals(pool: &PgPool, signals: &[AlphaSignal]) -> anyhow::
 
     for signal in signals {
         let result = sqlx::query(
-            "INSERT INTO alpha_signals (id, event_id, signal_type, magnitude, metadata, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            "INSERT INTO alpha_signals (event_id, signal_type, magnitude, metadata, created_at)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT DO NOTHING"
         )
-        .bind(signal.id)
+        
         .bind(&signal.event_id)
         .bind(&signal.signal_type)
         .bind(signal.magnitude)

@@ -879,11 +879,11 @@ pub async fn run_strategy_signal_loop(pool: PgPool) {
                             });
 
                             sqlx::query(
-                                "INSERT INTO alpha_signals (id, event_id, signal_type, magnitude, metadata, created_at)
-                                 VALUES ($1, $2, $3, $4, $5, NOW())
+                                "INSERT INTO alpha_signals (event_id, signal_type, magnitude, metadata, created_at)
+                                 VALUES ($1, $2, $3, $4, NOW())
                                  ON CONFLICT DO NOTHING"
                             )
-                            .bind(Uuid::new_v4())
+                            
                             .bind(event_id.to_string())
                             .bind(format!("strategy_{}", sig.signal_type))
                             .bind(sig.confidence)
