@@ -167,8 +167,6 @@ pub async fn detect_volume_spikes(
     let since = Utc::now() - Duration::hours(lookback_hours);
     let mut signals = Vec::new();
 
-    // FIXED: was `(EXTRACT ... % $3) * INTERVAL '1 minute'` which is invalid PG.
-    // Now uses make_interval(mins => ...) — type-safe, no string concat.
     let windows: Vec<(DateTime<Utc>, f64, f64, f64)> = sqlx::query_as(
         "WITH bucketed AS (
             SELECT
@@ -316,7 +314,6 @@ pub async fn persist_signals(pool: &PgPool, signals: &[AlphaSignal]) -> anyhow::
              VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT DO NOTHING"
         )
-        
         .bind(&signal.event_id)
         .bind(&signal.signal_type)
         .bind(signal.magnitude)
@@ -430,30 +427,33 @@ pub async fn run_alpha_detection_loop(pool: PgPool) {
     }
 }
 
+// ── Global Signal Query ────────────────────────────────────────────
+
 pub async fn get_global_signals(
     pool: &PgPool,
     signal_type: Option<&str>,
     limit: i64,
 ) -> anyhow::Result<Vec<AlphaSignal>> {
-    let signals = sqlx::query_unchecked!(
-        "SELECT id, event_id, signal_type, magnitude, metadata, created_at
-         FROM public.alpha_signals
-         WHERE ($1::text IS NULL OR signal_type = $1)
-         ORDER BY created_at DESC LIMIT $2",
-        signal_type,
-        limit
-    )
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|r| AlphaSignal {
-        id: r.id.unwrap_or_default(),
-        event_id: r.event_id.unwrap_or_default(),
-        signal_type: r.signal_type.unwrap_or_default(),
-        magnitude: r.magnitude.unwrap_or(0.0),
-        metadata: r.metadata.unwrap_or(serde_json::Value::Null),
-        created_at: r.created_at.unwrap_or_else(Utc::now),
-    })
-    .collect();
+    let signals = if let Some(st) = signal_type {
+        sqlx::query_as::<_, AlphaSignal>(
+            "SELECT id, event_id, signal_type, magnitude, metadata, created_at
+             FROM public.alpha_signals
+             WHERE signal_type = $1
+             ORDER BY created_at DESC LIMIT $2"
+        )
+        .bind(st)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, AlphaSignal>(
+            "SELECT id, event_id, signal_type, magnitude, metadata, created_at
+             FROM public.alpha_signals
+             ORDER BY created_at DESC LIMIT $1"
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
     Ok(signals)
 }
