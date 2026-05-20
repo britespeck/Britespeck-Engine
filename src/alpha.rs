@@ -429,3 +429,29 @@ pub async fn run_alpha_detection_loop(pool: PgPool) {
         }
     }
 }
+
+pub async fn get_global_signals(
+    pool: &PgPool,
+    signal_type: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<crate::models::AlphaSignal>> {
+    let rows = if let Some(st) = signal_type {
+        sqlx::query_as!(
+            crate::models::AlphaSignal,
+            "SELECT id, event_id, signal_type, magnitude, metadata, details, created_at
+             FROM public.alpha_signals
+             WHERE signal_type = $1
+             ORDER BY created_at DESC LIMIT $2",
+            st, limit
+        ).fetch_all(pool).await?
+    } else {
+        sqlx::query_as!(
+            crate::models::AlphaSignal,
+            "SELECT id, event_id, signal_type, magnitude, metadata, details, created_at
+             FROM public.alpha_signals
+             ORDER BY created_at DESC LIMIT $1",
+            limit
+        ).fetch_all(pool).await?
+    };
+    Ok(rows)
+}

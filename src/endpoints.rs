@@ -55,6 +55,11 @@ pub struct TradesResponse {
 }
 
 #[derive(Serialize)]
+pub struct GlobalAlphaResponse {
+    pub signals: Vec<AlphaSignal>,
+    pub count: usize,
+}
+#[derive(Serialize)]
 pub struct AlphaResponse {
     pub event_id: String,
     pub signals: Vec<AlphaSignal>,
@@ -98,6 +103,7 @@ pub fn alpha_routes() -> Router<PgPool> {
     Router::new()
         // alpha + trades
         .route("/trades/:event_id", get(get_trades_handler))
+        .route("/alpha_signals", get(get_global_alpha_signals_handler))
         .route("/alpha_signals/:event_id", get(get_alpha_signals_handler))
         .route("/calculate_ev", post(calculate_ev_handler))
         .route("/trade_signals", get(get_trade_signals_handler))
@@ -408,6 +414,25 @@ async fn get_trade_signals_handler(
             Json(ErrorResponse {
                 error: format!("Failed to fetch trade signals: {}", e),
             }),
+        )),
+    }
+}
+
+// ── GET /alpha_signals (global) ────────────────────────────────────
+async fn get_global_alpha_signals_handler(
+    State(pool): State<PgPool>,
+    Query(params): Query<AlphaQuery>,
+) -> Result<Json<GlobalAlphaResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = params.limit.unwrap_or(100).min(1000);
+    let signal_type = params.signal_type.as_deref();
+    match alpha::get_global_signals(&pool, signal_type, limit).await {
+        Ok(signals) => {
+            let count = signals.len();
+            Ok(Json(GlobalAlphaResponse { signals, count }))
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("Failed to fetch signals: {}", e) }),
         )),
     }
 }
