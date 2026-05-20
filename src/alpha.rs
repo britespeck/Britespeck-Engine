@@ -3,13 +3,13 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use uuid::Uuid;
+
 
 // ── Types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AlphaSignal {
-    pub id: Uuid,
+    pub id: i64,
     pub event_id: String,
     pub signal_type: String, // "wick", "volume_spike", "liquidity_gap"
     pub magnitude: f64,
@@ -145,7 +145,7 @@ fn analyze_bucket_for_wicks(
         };
 
         return Some(AlphaSignal {
-            id: Uuid::new_v4(),
+            id: 0,
             event_id: event_id.to_string(),
             signal_type: "wick".to_string(),
             magnitude: max_hidden,
@@ -236,7 +236,7 @@ pub async fn detect_volume_spikes(
             };
 
             signals.push(AlphaSignal {
-                id: Uuid::new_v4(),
+                id: 0,
                 event_id: event_id.to_string(),
                 signal_type: "volume_spike".to_string(),
                 magnitude: spike_ratio,
@@ -286,7 +286,7 @@ pub async fn detect_liquidity_gaps(
             };
 
             signals.push(AlphaSignal {
-                id: Uuid::new_v4(),
+                id: 0,
                 event_id: event_id.to_string(),
                 signal_type: "liquidity_gap".to_string(),
                 magnitude: gap,
