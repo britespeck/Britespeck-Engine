@@ -301,7 +301,9 @@ async fn run_lead_lag_loop(pool: sqlx::PgPool) {
              WHERE platform = 'Kalshi'
                AND status = 'active'
                AND odds > 0.02 AND odds < 0.98
-               AND (end_date IS NULL OR end_date > NOW() + INTERVAL '2 minutes')
+               AND end_date > NOW()
+               AND end_date < NOW() + INTERVAL '48 hours'
+               AND updated_at > NOW() - INTERVAL '10 minutes'
              ORDER BY volume_24h DESC NULLS LAST
              LIMIT 500"
         )
