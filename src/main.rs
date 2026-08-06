@@ -17,7 +17,7 @@ mod player_stats;
 mod live_prices;
 mod arb_detector;
 mod lead_lag;
-mod lead_lag_detector;
+mod relationship_detector;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -281,7 +281,7 @@ async fn get_lead_lag_pairs_handler(
 
 async fn run_lead_lag_loop(pool: sqlx::PgPool) {
     use crate::lead_lag::{upsert_signal, leader_move_bucket, LeadLagSignal, LeadLagDetector};
-    use crate::lead_lag_detector::{ContractMeta, RelationshipDetector};
+    use crate::relationship_detector::{ContractMeta, RelationshipDetector};
     use chrono::Utc;
 
     const CADENCE_SECS: u64 = 30;
@@ -301,9 +301,7 @@ async fn run_lead_lag_loop(pool: sqlx::PgPool) {
              WHERE platform = 'Kalshi'
                AND status = 'active'
                AND odds > 0.02 AND odds < 0.98
-               AND end_date > NOW()
-               AND end_date < NOW() + INTERVAL '48 hours'
-               AND updated_at > NOW() - INTERVAL '10 minutes'
+               AND updated_at > NOW() - INTERVAL '30 minutes'
              ORDER BY volume_24h DESC NULLS LAST
              LIMIT 500"
         )
