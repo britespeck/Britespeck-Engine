@@ -16,6 +16,8 @@ mod contract_parser;
 mod player_stats;
 mod live_prices;
 mod arb_detector;
+mod lead_lag;
+mod relationship_detector;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -89,23 +91,20 @@ async fn get_predictions(
            AND odds > 0.02
            AND odds < 0.98
            AND (
-             $1::boolean = false 
+             $1::boolean = false
              OR (
                category = 'Sports'
                AND updated_at > NOW() - INTERVAL '5 minutes'
              )
            )
-         ORDER BY 
-           -- Active before determined
+         ORDER BY
            CASE WHEN status = 'active' THEN 0 ELSE 1 END,
-           -- Recently traded contracts first (live games at top)
            CASE WHEN updated_at > NOW() - INTERVAL '5 minutes' THEN 0 ELSE 1 END,
-           -- Then by volume
            volume_24h DESC NULLS LAST
          LIMIT 20000"
     )
     .bind(live_only)
-        .fetch_all(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap_or_else(|e| {
         println!("❌ GET /prediction_events query failed: {}", e);
@@ -117,7 +116,7 @@ async fn get_predictions(
 
 async fn get_backtest(
     State(pool): State<sqlx::PgPool>,
-    Query(params): Query<BacktestParams>
+    Query(params): Query<BacktestParams>,
 ) -> Json<strategy::BacktestResult> {
     let res = strategy::run_backtest(&pool, params.rsi, params.days).await.unwrap_or_else(|e| {
         println!("❌ Backtest error: {}", e);
@@ -172,8 +171,6 @@ async fn patch_event_icon(
     }
 }
 
-
-/// GET /arb_signals — returns active arbitrage signals
 async fn get_arb_signals_handler(
     axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
 ) -> impl axum::response::IntoResponse {
@@ -185,6 +182,287 @@ async fn get_arb_signals_handler(
         }
     }
 }
+
+// ── Lead/Lag API Handlers ──────────────────────────────────────────────────
+
+async fn get_lead_lag_signals_handler(
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> impl axum::response::IntoResponse {
+    let rows = sqlx::query(
+        "SELECT id, leader_ticker, leader_title, leader_pct_move, leader_move_bucket,
+                lagger_ticker, lagger_title, lagger_price_w0, lagger_implied_wstar,
+                deviation_delta, z_score, signal_strength, relationship_type,
+                detected_at, entry_triggered, pnl_dollars
+         FROM lead_lag_signals
+         ORDER BY detected_at DESC
+         LIMIT 100"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    use sqlx::Row;
+    let signals: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
+        "id": r.try_get::<uuid::Uuid, _>("id").map(|u| u.to_string()).unwrap_or_default(),
+        "leader_ticker": r.try_get::<String, _>("leader_ticker").unwrap_or_default(),
+        "leader_title": r.try_get::<Option<String>, _>("leader_title").unwrap_or(None),
+        "leader_pct_move": r.try_get::<f64, _>("leader_pct_move").unwrap_or(0.0),
+        "leader_move_bucket": r.try_get::<Option<String>, _>("leader_move_bucket").unwrap_or(None),
+        "lagger_ticker": r.try_get::<String, _>("lagger_ticker").unwrap_or_default(),
+        "lagger_title": r.try_get::<Option<String>, _>("lagger_title").unwrap_or(None),
+        "lagger_price_w0": r.try_get::<f64, _>("lagger_price_w0").unwrap_or(0.0),
+        "lagger_implied_wstar": r.try_get::<f64, _>("lagger_implied_wstar").unwrap_or(0.0),
+        "deviation_delta": r.try_get::<f64, _>("deviation_delta").unwrap_or(0.0),
+        "z_score": r.try_get::<f64, _>("z_score").unwrap_or(0.0),
+        "signal_strength": r.try_get::<String, _>("signal_strength").unwrap_or_default(),
+        "relationship_type": r.try_get::<String, _>("relationship_type").unwrap_or_default(),
+        "detected_at": r.try_get::<chrono::DateTime<chrono::Utc>, _>("detected_at")
+            .map(|t| t.to_rfc3339()).unwrap_or_default(),
+        "entry_triggered": r.try_get::<bool, _>("entry_triggered").unwrap_or(false),
+        "pnl_dollars": r.try_get::<Option<f64>, _>("pnl_dollars").unwrap_or(None),
+    })).collect();
+
+    axum::Json(serde_json::json!({ "signals": signals, "count": signals.len() })).into_response()
+}
+
+async fn get_lead_lag_throughput_handler(
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> impl axum::response::IntoResponse {
+    let rows = sqlx::query(
+        "SELECT date::text, total_scans, total_signals_fired, avg_signals_per_scan,
+                empty_scans_pct, fire_rate_pct, avg_scan_ms, est_signals_per_hour
+         FROM throughput_summary
+         ORDER BY date DESC LIMIT 7"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    use sqlx::Row;
+    let data: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
+        "date": r.try_get::<String, _>("date").unwrap_or_default(),
+        "total_scans": r.try_get::<i64, _>("total_scans").unwrap_or(0),
+        "signals_fired": r.try_get::<i64, _>("total_signals_fired").unwrap_or(0),
+        "avg_per_scan": r.try_get::<f64, _>("avg_signals_per_scan").unwrap_or(0.0),
+        "empty_scans_pct": r.try_get::<f64, _>("empty_scans_pct").unwrap_or(0.0),
+        "fire_rate_pct": r.try_get::<f64, _>("fire_rate_pct").unwrap_or(0.0),
+        "est_per_hour": r.try_get::<f64, _>("est_signals_per_hour").unwrap_or(0.0),
+    })).collect();
+
+    axum::Json(serde_json::json!({ "throughput": data })).into_response()
+}
+
+async fn get_lead_lag_pairs_handler(
+    axum::extract::State(pool): axum::extract::State<sqlx::PgPool>,
+) -> impl axum::response::IntoResponse {
+    let rows = sqlx::query(
+        "SELECT COALESCE(leader_series, leader_ticker) AS leader,
+                COALESCE(lagger_series, lagger_ticker) AS lagger,
+                relationship_type, elasticity::float8, source
+         FROM lead_lag_pairs WHERE is_active = TRUE ORDER BY elasticity DESC"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    use sqlx::Row;
+    let pairs: Vec<serde_json::Value> = rows.iter().map(|r| serde_json::json!({
+        "leader": r.try_get::<String, _>("leader").unwrap_or_default(),
+        "lagger": r.try_get::<String, _>("lagger").unwrap_or_default(),
+        "relationship_type": r.try_get::<String, _>("relationship_type").unwrap_or_default(),
+        "elasticity": r.try_get::<f64, _>("elasticity").unwrap_or(0.0),
+        "source": r.try_get::<String, _>("source").unwrap_or_default(),
+    })).collect();
+
+    axum::Json(serde_json::json!({ "pairs": pairs })).into_response()
+}
+
+// ── Lead/Lag Background Loop ───────────────────────────────────────────────
+
+async fn run_lead_lag_loop(pool: sqlx::PgPool) {
+    use crate::lead_lag::{upsert_signal, leader_move_bucket, LeadLagSignal, LeadLagDetector};
+    use crate::relationship_detector::{ContractMeta, RelationshipDetector, log_throughput};
+    use chrono::Utc;
+
+    const CADENCE_SECS: u64 = 30;
+
+    tracing::info!("🔗 Lead/lag detection loop started ({}s cadence)", CADENCE_SECS);
+
+    let client = reqwest::Client::builder()
+        .user_agent("Britespeck-Engine/1.0")
+        .timeout(Duration::from_secs(20))
+        .build()
+        .expect("HTTP client for lead/lag");
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(CADENCE_SECS));
+
+    loop {
+        ticker.tick().await;
+        let scan_start = Utc::now();
+
+        // Fetch live contracts from prediction_events (already synced by main loop)
+        let rows = sqlx::query(
+            "SELECT external_id, title, odds, category, outcomes, end_date, volume_24h
+             FROM public.prediction_events
+             WHERE platform = 'Kalshi'
+               AND status = 'active'
+               AND odds > 0.02 AND odds < 0.98
+               AND (end_date IS NULL OR end_date > NOW() + INTERVAL '2 minutes')
+             ORDER BY volume_24h DESC NULLS LAST
+             LIMIT 500"
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default();
+
+        use sqlx::Row;
+        let contracts: Vec<ContractMeta> = rows.iter().filter_map(|r| {
+            let external_id: String = r.try_get("external_id").ok()?;
+            let ticker = external_id.replace("kalshi:", "");
+            let odds: f64 = r.try_get("odds").unwrap_or(0.0);
+            if odds <= 0.01 { return None; }
+            let close_time = r.try_get::<Option<chrono::DateTime<Utc>>, _>("end_date")
+                .unwrap_or(None);
+
+            Some(ContractMeta::from_api(
+                &ticker,
+                &ticker,
+                r.try_get("title").ok(),
+                None,
+                r.try_get("category").ok(),
+                close_time,
+                odds,
+                r.try_get("volume_24h").unwrap_or(0.0),
+                2000.0,  // depth placeholder
+                0.04,    // spread placeholder
+            ))
+        }).collect();
+
+        if contracts.is_empty() {
+            tracing::debug!("Lead/lag: no live contracts from DB");
+            continue;
+        }
+
+        // Detect structural pairs
+        let (pairs, stats) = RelationshipDetector::detect_all(&contracts);
+        let scan_duration_ms = (Utc::now() - scan_start).num_milliseconds();
+
+        let mut signals_fired = 0i32;
+        let mut blocked_z = 0i32;
+        let mut blocked_depth = 0i32;
+
+        for pair in &pairs {
+            // Get recent price history for σ calculation
+            let recent: Vec<f64> = sqlx::query_scalar(
+                "SELECT odds FROM public.prediction_events
+                 WHERE external_id = $1
+                 UNION ALL
+                 SELECT odds FROM public.market_history
+                 WHERE external_id = $1
+                 ORDER BY 1 DESC LIMIT 20"
+            )
+            .bind(format!("kalshi:{}", pair.lagger.ticker))
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+
+            // Get previous leader price for before/after comparison
+            let leader_price_before: f64 = sqlx::query_scalar(
+                "SELECT odds FROM public.market_history
+                 WHERE external_id = $1
+                 ORDER BY recorded_at DESC LIMIT 1 OFFSET 1"
+            )
+            .bind(format!("kalshi:{}", pair.leader.ticker))
+            .fetch_optional(&pool)
+            .await
+            .unwrap_or(None)
+            .unwrap_or(pair.leader.yes_price * 0.92); // fallback: assume 8% move
+
+            let lagger_bid = pair.lagger.yes_price - pair.lagger.spread / 2.0;
+            let lagger_ask = pair.lagger.yes_price + pair.lagger.spread / 2.0;
+            let secs_to_close = pair.lagger.close_time
+                .map(|ct| (ct - Utc::now()).num_seconds())
+                .unwrap_or(3600);
+
+            match LeadLagDetector::detect(
+                &pair.leader.ticker,
+                pair.leader.title.as_deref().unwrap_or(&pair.leader.ticker),
+                leader_price_before,
+                pair.leader.yes_price,
+                &pair.lagger.ticker,
+                pair.lagger.title.as_deref().unwrap_or(&pair.lagger.ticker),
+                pair.lagger.yes_price,
+                &recent,
+                pair.lagger.depth_dollars,
+                lagger_bid,
+                lagger_ask,
+                secs_to_close,
+                &pair.relationship_type,
+            ) {
+                Some(ll_pair) => {
+                    signals_fired += 1;
+                    let bucket = leader_move_bucket(ll_pair.leader_pct_move).to_string();
+                    let signal = LeadLagSignal {
+                        id: uuid::Uuid::new_v4(),
+                        pair: ll_pair,
+                        entry_triggered: false,
+                        entry_blocked_reason: None,
+                        entry_price: None,
+                        entry_at: None,
+                        position_size_dollars: None,
+                        exit_price: None,
+                        exit_at: None,
+                        exit_reason: None,
+                        convergence_achieved_pct: None,
+                        pnl_dollars: None,
+                        pnl_vs_model_optimal: None,
+                        entry_latency_ms: None,
+                        exit_latency_vs_optimal_ms: None,
+                    };
+                    if let Err(e) = upsert_signal(&pool, &signal).await {
+                        tracing::warn!("lead_lag upsert: {}", e);
+                    }
+                }
+                None => {
+                    if pair.lagger.depth_dollars < 1500.0 { blocked_depth += 1; }
+                    else { blocked_z += 1; }
+                }
+            }
+        }
+
+        // Log throughput
+        let _ = sqlx::query(
+            "INSERT INTO lead_lag_throughput (
+                scan_at, scan_duration_ms, scan_cadence_seconds,
+                contracts_scanned, pairs_evaluated, pairs_detected, signals_fired,
+                blocked_by_depth, blocked_by_z,
+                signals_by_relationship, signals_by_sport,
+                avg_depth
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)"
+        )
+        .bind(stats.scan_at)
+        .bind(scan_duration_ms)
+        .bind(CADENCE_SECS as i32)
+        .bind(contracts.len() as i32)
+        .bind(stats.pairs_evaluated as i32)
+        .bind(stats.pairs_detected as i32)
+        .bind(signals_fired)
+        .bind(blocked_depth)
+        .bind(blocked_z)
+        .bind(serde_json::to_value(&stats.signals_by_relationship).unwrap_or_default())
+        .bind(serde_json::to_value(&stats.signals_by_sport).unwrap_or_default())
+        .bind(stats.avg_depth)
+        .execute(&pool)
+        .await;
+
+        tracing::info!(
+            "🔗 Lead/lag: {} contracts → {} pairs → {} signals | {}ms",
+            contracts.len(), pairs.len(), signals_fired, scan_duration_ms
+        );
+    }
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -217,6 +495,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/prediction_events/:id/icon", patch(patch_event_icon))
         .route("/index_history", get(get_index_history))
         .route("/backtest", get(get_backtest))
+        // ── Lead/Lag endpoints ──
+        .route("/lead_lag/signals",    get(get_lead_lag_signals_handler))
+        .route("/lead_lag/throughput", get(get_lead_lag_throughput_handler))
+        .route("/lead_lag/pairs",      get(get_lead_lag_pairs_handler))
         .merge(endpoints::alpha_routes())
         .merge(market_history::routes())
         .merge(indicators::routes())
@@ -229,7 +511,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(CorsLayer::permissive())
         .with_state(api_pool.clone());
 
-    // ── Background workers ──
+    // ── Background workers ─────────────────────────────────────────────────
     let trade_pool = api_pool.clone();
     tokio::spawn(trades::run_trade_ingestion_loop(trade_pool, reqwest::Client::new()));
     tokio::spawn(alpha::run_alpha_detection_loop(api_pool.clone()));
@@ -237,11 +519,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(market_history::run_poly_history_loop(api_pool.clone()));
     tokio::spawn(live_stats::run_live_stats_loop(api_pool.clone()));
     tokio::spawn(strategy_signals::run_strategy_signal_loop(api_pool.clone()));
-
-    // Polymarket CLOB websocket (public, no auth)
     tokio::spawn(fetchers::polymarket_clob::run_polymarket_clob_loop(api_pool.clone()));
 
-    // ── Fast Kalshi Price Refresh (every 60s, top 100 markets) ───────
+    // ── Lead/Lag detection loop (NEW) ──────────────────────────────────────
+    tokio::spawn(run_lead_lag_loop(api_pool.clone()));
+
+    // ── Fast Kalshi Price Refresh (every 15s, top 200 markets) ────────────
     {
         let fast_pool = api_pool.clone();
         let fast_client = reqwest::Client::builder()
@@ -254,7 +537,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 tokio::time::sleep(Duration::from_secs(15)).await;
 
-                // Get top 100 active Kalshi markets by volume
                 let top_markets: Vec<(uuid::Uuid, String)> = sqlx::query_as(
                     "SELECT id, external_id FROM public.prediction_events
                      WHERE platform = 'Kalshi' AND status = 'active' AND (end_date IS NULL OR end_date > NOW())
@@ -264,7 +546,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .unwrap_or_default();
 
-                let token = std::env::var("KALSHI_API_TOKEN").unwrap_or_default();
                 let mut updated = 0u32;
 
                 for (id, external_id) in &top_markets {
@@ -274,10 +555,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ticker
                     );
 
-                    if let Ok(resp) = fast_client.get(&url)
-                        //.header("Authorization", format!("Bearer {}", token))
-                        .send().await
-                    {
+                    if let Ok(resp) = fast_client.get(&url).send().await {
                         if let Ok(data) = resp.json::<serde_json::Value>().await {
                             let yes_bid = data.get("market")
                                 .and_then(|m| m.get("yes_bid_dollars").or_else(|| m.get("yes_bid")))
@@ -310,7 +588,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    // 200ms delay — 100 markets = 20 seconds total, well within rate limits
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 tracing::info!("⚡ Fast Kalshi refresh: {} markets updated", updated);
@@ -318,7 +595,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Kalshi WebSocket — strip "kalshi:" prefix before passing to ws loop
+    // ── Kalshi WebSocket ───────────────────────────────────────────────────
     let kalshi_pool = api_pool.clone();
     tokio::spawn(async move {
         loop {
@@ -346,9 +623,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            // kalshi_ws now uses global subscription (&[]) internally
-            // subscribes to ALL Kalshi markets via Channel::Ticker, Trade, OrderbookDelta
-            // No need to pass tickers — learned from pbeets stream_firehose.rs
             println!("🟢 kalshi_ws: connecting with global subscription");
             if let Err(e) = fetchers::kalshi_ws::run_kalshi_ws_loop(
                 kalshi_pool.clone(),
@@ -360,7 +634,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // ── Main REST sync loop ──
+    // ── Main REST sync loop ────────────────────────────────────────────────
     tokio::spawn(async move {
         let fetcher = MarketFetcher::new();
         let mut kalshi_headers = HeaderMap::new();
@@ -455,105 +729,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => eprintln!("❌ Batch upsert failed: {}", e),
                 }
 
-                // Auto-close expired contracts
-                sqlx::query(
-                    "UPDATE public.prediction_events
-                     SET status = 'closed'
-                     WHERE status = 'active'
-                       AND end_date < NOW()"
-                )
-                .execute(&sync_pool)
-                .await
-                .ok();
+                sqlx::query("UPDATE public.prediction_events SET status = 'closed' WHERE status = 'active' AND end_date < NOW()")
+                    .execute(&sync_pool).await.ok();
+                sqlx::query("UPDATE public.prediction_events SET status = 'closed' WHERE status = 'active' AND (odds > 0.99 OR odds < 0.01)")
+                    .execute(&sync_pool).await.ok();
+                sqlx::query("UPDATE public.prediction_events SET status = 'closed' WHERE status = 'active' AND volume_24h < 1 AND end_date IS NOT NULL AND end_date < NOW() + INTERVAL '1 hour'")
+                    .execute(&sync_pool).await.ok();
+                sqlx::query("UPDATE public.prediction_events SET status = 'closed' WHERE status = 'active' AND (odds >= 0.97 OR odds <= 0.03) AND updated_at < NOW() - INTERVAL '1 hour'")
+                    .execute(&sync_pool).await.ok();
 
-                // Auto-close essentially resolved contracts (99¢+ or 1¢-)
-                sqlx::query(
-                    "UPDATE public.prediction_events
-                     SET status = 'closed'
-                     WHERE status = 'active'
-                       AND (odds > 0.99 OR odds < 0.01)"
-                )
-                .execute(&sync_pool)
-                .await
-                .ok();
-
-                // Auto-close zero volume with approaching end date
-                sqlx::query(
-                    "UPDATE public.prediction_events
-                     SET status = 'closed'
-                     WHERE status = 'active'
-                       AND volume_24h < 1
-                       AND end_date IS NOT NULL
-                       AND end_date < NOW() + INTERVAL '1 hour'"
-                )
-                .execute(&sync_pool)
-                .await
-                .ok();
-
-                // Auto-close determined contracts:
-                // 1. Near-resolved AND no recent trading activity
-                // 2. Odds at extremes = market has spoken
-                sqlx::query(
-                    "UPDATE public.prediction_events
-                     SET status = 'closed'
-                     WHERE status = 'active'
-                       AND (
-                         -- Clearly resolved: at or near 100%/0%
-                         (odds >= 0.97 OR odds <= 0.03)
-                         AND updated_at < NOW() - INTERVAL '1 hour'
-                       )"
-                )
-                .execute(&sync_pool)
-                .await
-                .ok();
-
-                // ── Auto-cleanup old data ─────────────────────────────
-                // Runs every 30s but each DELETE is fast because tables stay small
-
-                // Alpha signals — keep 6 hours only (was 1 day, too slow)
-                sqlx::query(
-                    "DELETE FROM public.alpha_signals
-                     WHERE created_at < NOW() - INTERVAL '6 hours'"
-                )
-                .execute(&sync_pool)
-                .await
-                .ok();
-
-                // Market indicators — keep 24 hours only
-                sqlx::query(
-                    "DELETE FROM public.market_indicators
-                     WHERE computed_at < NOW() - INTERVAL '24 hours'"
-                )
-                .execute(&sync_pool)
-                .await
-                .ok();
-
-                // Orderbook snapshots — keep 2 hours only (real-time data only)
-                sqlx::query(
-                    "DELETE FROM public.orderbook_snapshots
-                     WHERE captured_at < NOW() - INTERVAL '2 hours'"
-                )
-                .execute(&sync_pool)
-                .await
-                .ok();
-
-                // Market history — keep 7 days only (enough for all momentum calcs)
-                sqlx::query(
-                    "DELETE FROM public.market_history
-                     WHERE recorded_at < NOW() - INTERVAL '7 days'"
-                )
-                .execute(&sync_pool)
-                .await
-                .ok();
-
-                // Raw trades — keep 30 days only
-                sqlx::query(
-                    "DELETE FROM public.raw_trades
-                     WHERE ingested_at < NOW() - INTERVAL '30 days'"
-                )
-                .execute(&sync_pool)
-                .await
-                .ok();
+                sqlx::query("DELETE FROM public.alpha_signals WHERE created_at < NOW() - INTERVAL '6 hours'")
+                    .execute(&sync_pool).await.ok();
+                sqlx::query("DELETE FROM public.market_indicators WHERE computed_at < NOW() - INTERVAL '24 hours'")
+                    .execute(&sync_pool).await.ok();
+                sqlx::query("DELETE FROM public.orderbook_snapshots WHERE captured_at < NOW() - INTERVAL '2 hours'")
+                    .execute(&sync_pool).await.ok();
+                sqlx::query("DELETE FROM public.market_history WHERE recorded_at < NOW() - INTERVAL '7 days'")
+                    .execute(&sync_pool).await.ok();
+                sqlx::query("DELETE FROM public.raw_trades WHERE ingested_at < NOW() - INTERVAL '30 days'")
+                    .execute(&sync_pool).await.ok();
 
                 match market_history::write_snapshots(
                     &sync_pool, &ids, &titles, &platforms, &odds, volumes.as_slice(),
@@ -567,7 +761,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("⚠️ OMG Strategy Warning: {}", e);
             }
 
-            println!("💤 Sleeping 60s...");
+            println!("💤 Sleeping 15s...");
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
     });
