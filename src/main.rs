@@ -17,7 +17,7 @@ mod player_stats;
 mod live_prices;
 mod arb_detector;
 mod lead_lag;
-mod relationship_detector;
+mod lead_lag_detector;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::time::Duration;
@@ -281,7 +281,7 @@ async fn get_lead_lag_pairs_handler(
 
 async fn run_lead_lag_loop(pool: sqlx::PgPool) {
     use crate::lead_lag::{upsert_signal, leader_move_bucket, LeadLagSignal, LeadLagDetector};
-    use crate::relationship_detector::{ContractMeta, RelationshipDetector};
+    use crate::lead_lag_detector::{ContractMeta, RelationshipDetector};
     use chrono::Utc;
 
     const CADENCE_SECS: u64 = 30;
